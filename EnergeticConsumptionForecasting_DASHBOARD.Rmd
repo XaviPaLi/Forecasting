@@ -1,0 +1,313 @@
+---
+title: "ANÁLISIS DE DATOS APLICADO A SMART HOMES"
+author: "Javier Paneque Linares"
+date: "23/02/2022"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library('flexdashboard')
+library('shiny')
+library('dplyr')
+library('chron')
+library('lubridate')
+library('ggplot2')
+library('VIM')
+library('zoo')
+library('imputeTS')
+library('tidyr')
+library('tidyverse')
+library('ggpubr')
+library('scales')
+library('xts')
+library('dygraphs')
+library('plotly')
+library('quantmod')
+library('forecast')
+library('seasonal')
+library('caret')
+```
+
+```{r include=F}
+load("Data.RData")
+```
+
+
+```{r}
+FUN.PlotName <- function(plot){
+  N <- 10
+  for(i in 1:N){
+    plot$x$data[[i]]$name <- 'Valor'
+    plot$x$data[[i+N*4]]$name <- 'Valor'
+  }
+  for(i in (N+1):(2*N)){
+    plot$x$data[[i]]$name <- 'Tendencia'
+    plot$x$data[[i+N*4]]$name <- 'Tendencia'
+  }
+  for(i in (2*N+1):(3*N)){
+    plot$x$data[[i]]$name <- 'Tendencia + Estacionalidad'
+    plot$x$data[[i+N*4]]$name <- 'Tendencia + Estacionalidad'
+  }
+  return(plot)
+}
+```
+
+```{r}
+FUN.PlotModel <- function(plot){
+  vec <- c(seq(1,10),seq(21,30))
+  for(i in vec){
+    plot$x$data[[i]]$name <- 'Predicción'
+  }
+  return(plot)
+}
+```
+
+```{r}
+Dia <- c(as.character(seq(1,31)))
+Mes <- c(as.character(seq(1,12)))
+Ano <- c(as.character(seq(2007,2010)))
+CP <- c('Largo Plazo','Medio Plazo','Corto Plazo')
+```
+
+LARGO PLAZO
+=======================================================================
+
+Row {data-height=550}
+-------------------------------------
+
+### CONSUMO HISTÓRICO
+
+```{r GeneralAnual, fig.cap="Energía registrada por los subcontadores agrupada por meses."}
+PLOT.LP.GenAnual
+```
+
+Row {data-height=450}
+-------------------------------------
+
+### PROGRESIÓN ANUAL
+
+```{r ProporcionAnual, fig.cap="Porcentaje sobre el total de la energía registrada por cada subcontador.",fig.width=8,fig.height=3}
+PLOT.LP.FracAnual
+```
+
+### OBSERVACIONES
+
+Se puede observar que, durante los periodos veraniegos, el consumo cae considerablemente mientras que invierno es el periodo que marca mayores picos.
+
+La energía reactiva se mantiene estable y no va en aumento. En caso de registrar un aumento notable, sería indicado revisar la instalación eléctrica.
+
+Se observa una clara tendencia: **el calentador y aire acondicionado gana protagonismo con el tiempo**. También hay una **reducción en el consumo en la lavandería** aunque esta tendencia es algo más débil.
+
+MEDIO PLAZO
+=======================================================================
+
+Row {data-height=500}
+-------------------------------------
+
+### CONSUMO DIARIO
+
+```{r PercentilesDia, fig.cap="Energía diaria registrada por los subcontadores. Percentiles 10%-90%.",warning=FALSE,fig.width=10,fig.height=10}
+PLOT.CP.PercDias
+```
+
+Row {data-height=500}
+-------------------------------------
+
+### OBSERVACIONES
+
+La imagen muestra como sería una semana modelo media. Se observan distintos patrones según el subcontador considerado:
+
+* **Cocina**: El consumo realizado en la cocina muestra un **mayor gasto energético los fines de semana**. Sin embargo, no hay patrones claros a destacar además de la diferenciación entre los días de entre semana y los fines de semana. Tal vez los fines de semana sea habitual hacer comidas más elaboradas con invitados o cocinar para el resto de la semana.
+
+* **Lavandería**: Se observan los siguientes patrones
+
+  * A excepción del periodo veraniego, el resto de estaciones del año muestran dos o tres días donde repunta el consumo.
+
+  * Todo apunta a que se haría la colada estos días de la semana de forma regular. Podríamos asumir que este **mayor consumo se da el martes o miércoles y el sábado o domingo**.
+  
+  * Por supuesto existen ciertas semanas en que la lavandería se ha usado fuera de este horario más habitual dependiendo de las necesidades puntuales que hayan podido surgir. Sin embargo, se observa que es especialmente **poco habitual el uso de la lavandería los lunes y los jueves**.
+
+* **AC y Calentador**: El uso del calentador y AC son bastante **regulares e independientes del día de la semana**. Aún así, se observa un **mayor consumo los sábados**. Podría estar relacionado con el consumo indicado por los demás subcontadores: actividades como lavar la ropa o cocinar requieren de agua caliente.
+
+
+CORTO PLAZO
+=======================================================================
+
+
+Column {.sidebar data-width=200}
+-----------------------------------------------------------------------
+
+```{r}
+selectInput(inputId="Dia", label = "Seleccionar Día:", choices = Dia)
+selectInput(inputId="Mes", label = "Seleccionar Mes:", choices = CHA.Mes)
+selectInput(inputId="Ano", label = "Seleccionar Año:", choices = Ano)
+```
+
+Row {data-height=550}
+-------------------------------------
+
+### CONSUMO HABITUAL
+
+```{r PercentilesHora, fig.cap="Energía por hora registrada por los subcontadores. Intervalo de consumo del 90%.",warning=FALSE,fig.height=6}
+PLOT.CP.PercHoras
+```
+
+### OBSERVACIONES
+
+* Existen diferencias significativas entre los fines de semana y el resto de días.
+
+* El gráfico a la izquierda muestra el consumo por horas a lo largo de la semana. Se visualizan los valores máximos y mínimos y da una idea de como es un día modelo. De este gráfico podemos extraer información para cada subcontador:
+
+* **Cocina**
+
+  * Consumo medio bajo. Esto significa que no hay hábitos fijos, horario de consumo flexible.
+
+  * Consumo habitual a mediodía y noche entre semana coincidiendo en las horas del almuerzo y cena.
+
+  * Los fines de semana se muestra un mayor consumo, manteniendo el pico de consumo entre mediodía y noche de forma constante.
+
+* **Lavandería**
+
+  * El consumo de la lavandería repunta los martes/miércoles y los sábados/domingos.
+
+  * Podemos interpretar que se utiliza la lavadora y/o secadora dos veces a la semana.
+
+* **Calentador y AC**
+
+  * Sus valores muestran una clara dependencia con el consumo asociado a cocina y lavandería.
+
+  * Los valores máximos son parecidos para todos los días, no distingue entre fin de semana y el resto de días.
+
+  * Consumo más regular que los demás electrodomésticos.
+  
+  * El consumo del calentador es bastante regular por lo que existe potencial ahorro si optimizamos estos ciclos de encendido y apagado.
+
+Row {data-height=450}
+-------------------------------------
+
+### CONSUMO POR SEMANAS
+
+```{r ConsumoHora, fig.cap="Energía registrada por horas y día de la semana.",warning=FALSE,fig.height=6}
+renderPlotly({FUN.WeekPlot(DF.Data.Hour,as.Date(paste(input$Ano,Mes[input$Mes==CHA.Mes],input$Dia,sep='-')))})
+```  
+
+LARGO PLAZO {data-navmenu="PREVISIÓN DE FUTURO"}
+=======================================================================
+
+Row {data-height=500}
+-------------------------------------
+
+### COMENTARIOS
+
+* Somos capaces de predecir con gran precisión el futuro consumo total.
+
+* La energía perdida se mantiene estable.
+
+* El calentador y AC muestra una tendencia al alza a largo plazo. Debemos monitorizar su consumo. En caso de un aumento no justificado deberíamos revisar la instalación en busca de posibles averías o pérdidas de eficiencia.
+
+### ENERGÍA TOTAL
+
+```{r EAPredLP, fig.cap="Energía Total. Largo Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.LP.EA,TS.LP[,'EA'],CHA.Yearly.Pred,18))
+``` 
+
+### ENERGÍA PERDIDA
+
+```{r ERAPredLP, fig.cap="Energía Perdida. Largo Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.LP.ER,TS.LP[,'ER'],CHA.Yearly.Pred,18))
+``` 
+
+Row {data-height=500}
+-------------------------------------
+
+### COCINA
+
+```{r SC1PredLP, fig.cap="Cocina. Largo Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.LP.SC1,TS.LP[,'SC1'],CHA.Yearly.Pred,18))
+``` 
+
+### LAVANDERÍA
+
+```{r SC2PredLP, fig.cap="Lavandería. Largo Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.LP.SC2,TS.LP[,'SC2'],CHA.Yearly.Pred,18))
+```
+
+### CALENTADOR Y AC
+
+```{r SC3PredLP, fig.cap="Calentador y AC. Largo Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.LP.SC3,TS.LP[,'SC3'],CHA.Yearly.Pred,18))
+```
+
+MEDIO PLAZO {data-navmenu="PREVISIÓN DE FUTURO"}
+=======================================================================
+
+Row {data-height=500}
+-------------------------------------
+
+### ENERGÍA TOTAL
+
+```{r EAPredMP, fig.cap="Energía Total. Medio Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.MP.EA,TS.MP[,'EA'],CHA.Semana.Pred,20))
+``` 
+
+### COCINA
+
+```{r SC1PredMP, fig.cap="Cocina. Medio Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.MP.SC1,TS.MP[,'SC1'],CHA.Semana.Pred,20))
+``` 
+
+Row {data-height=500}
+-------------------------------------
+
+### LAVANDERÍA
+
+```{r SC2PredMP, fig.cap="Lavandería. Medio Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.MP.SC2,TS.MP[,'SC2'],CHA.Semana.Pred,20))
+```
+
+### CALENTADOR Y AC
+
+```{r SC3PredMP, fig.cap="Calentador y AC. Medio Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.MP.SC3,TS.MP[,'SC3'],CHA.Semana.Pred,20))
+```
+
+CORTO PLAZO {data-navmenu="PREVISIÓN DE FUTURO"}
+=======================================================================
+
+Row {data-height=500}
+-------------------------------------
+
+### ENERGÍA TOTAL
+
+```{r EAPredCP, fig.cap="Energía Total. Corto Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.CP.EA.ES,TS.CP.ES[,'EA'],CHA.Dia.ES.Pred,12))
+``` 
+
+### COCINA
+
+```{r SC1PredCP, fig.cap="Cocina. Corto Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.CP.SC1.ES,TS.CP.ES[,'SC1'],CHA.Dia.ES.Pred,12))
+``` 
+
+Row {data-height=500}
+-------------------------------------
+
+### LAVANDERÍA
+
+```{r SC2PredCP, fig.cap="Lavandería. Corto Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.CP.SC2.ES,TS.CP.ES[,'SC2'],CHA.Dia.ES.Pred,12))
+```
+
+### CALENTADOR Y AC
+
+```{r SC3PredCP, fig.cap="Calentador y AC. Corto Plazo.",warning=FALSE,fig.height=6}
+FUN.PlotModel(FUN.M.Plot(M.CP.SC3.ES,TS.CP.ES[,'SC3'],CHA.Dia.ES.Pred,12))
+```
+
+
+
+

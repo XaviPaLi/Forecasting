@@ -1,0 +1,2672 @@
+---
+title: "ANÁLISIS DE DATOS APLICADO A SMART HOMES"
+author: "Javier Paneque Linares"
+date: "23/02/2022"
+output: 
+  bookdown::html_document2:
+    code_folding: hide
+    toc: true
+    toc_depth: 5
+    theme: united
+    fig_caption: true
+    number_sections: true
+    global_numbering: true
+toc-title: "ÍNDICE"
+---
+
+```{r include=FALSE}
+#Se cargan las librerías necesarias
+library('RMySQL')
+library('dplyr')
+library('chron')
+library('lubridate')
+library('ggplot2')
+library('VIM')
+library('zoo')
+library('imputeTS')
+library('tidyr')
+library('tidyverse')
+library('ggpubr')
+library('scales')
+library('xts')
+library('dygraphs')
+library('plotly')
+library('quantmod')
+library('forecast')
+library('seasonal')
+library('caret')
+```
+
+# CONOCIMIENTO DEL PROBLEMA
+
+Un gran desarrollador regional está diseñando una serie de viviendas **Smart Home** y está buscando evidencias para adoptar el uso de dispositivos de submedición eléctrica o subcontadores.
+
+La instalación de los subcontadores podría ser un gran paso hacia el objetivo: ofrecer hogares altamente eficientes en términos de domótica.  Dichos subcontadores deben ayudar a analizar el uso de energía y permitir su optimización tal y como apunta su trabajo de marketing.
+
+Se nos ha pedido **encontrar evidencia para ayudar a respaldar las afirmaciones realizadas como marketing por parte del desarrollador**. Para ello se realizará un profundo análisis de los datos generados por los subcontadores que respalden una narrativa o historia entorno a sus hallazgos.
+
+También se nos pidió **demostrar que es posible predecir el futuro consumo energético** a partir de los mismos datos. Esto ayudaría a respaldar aún más la apuesta por los subcontadores para la reducción del consumo energético y, como resultado, el ahorro económico.
+
+# RECOLECCIÓN DE LOS DATOS
+
+La base de datos está guardada por el proveedor de servicios en la nube Amazon Web Services (AWS). Se dispone de una cuenta con permisos de lectura de Amazon Relational Database Service (RDS) de manera que podemos consultar los datos sin riesgo de que esta sea manipulada.
+
+## CARGADO DE LOS DATOS 
+
+Se crea una conexión a la base de datos y se listan las tablas que contiene la base de datos:
+
+```{r}
+# Se crea una conexión de base de datos
+SQL.Connection <- dbConnect(MySQL(), user='deepAnalytics', password='Sqltask1234!', dbname='dataanalytics2018', host='data-analytics-2018.cbrosir2cswx.us-east-1.rds.amazonaws.com')
+#Se listan las tablas 
+dbListTables(SQL.Connection)
+```
+
+Guardamos los datos relativos a los subcontadores en un dataframe:
+
+```{r}
+#Dataframe con todos los datos
+DF.Data <- bind_rows(dbGetQuery(SQL.Connection,
+"SELECT Date,Time,Sub_metering_1,Sub_metering_2,Sub_metering_3,Global_active_power,Global_reactive_power FROM yr_2006"),
+                     dbGetQuery(SQL.Connection,
+"SELECT Date,Time,Sub_metering_1,Sub_metering_2,Sub_metering_3,Global_active_power,Global_reactive_power FROM yr_2007"),
+                     dbGetQuery(SQL.Connection,
+"SELECT Date,Time,Sub_metering_1,Sub_metering_2,Sub_metering_3,Global_active_power,Global_reactive_power FROM yr_2008"),
+                     dbGetQuery(SQL.Connection,
+"SELECT Date,Time,Sub_metering_1,Sub_metering_2,Sub_metering_3,Global_active_power,Global_reactive_power FROM yr_2009"),
+                     dbGetQuery(SQL.Connection,
+"SELECT Date,Time,Sub_metering_1,Sub_metering_2,Sub_metering_3,Global_active_power,Global_reactive_power FROM yr_2010"))
+```
+
+## DESCRIPCIÓN DE LAS VARIABLES 
+
+Los datos contienen información histórica sobre el consumo en la vivienda durante un periodo de 47 meses, entre diciembre de 2006 y noviembre de 2010. Las variables que se van a utilizar son las siguientes:
+
+* **Fecha y hora** del consumo con granularidad de minutos.
+* **Potencia activa y reactiva** global en kilovatios (KW).
+* **Energía activa para cada sub-contador** (en Wh). Cada subcontador abarca las siguientes zonas del hogar y electrodómesticos.
+  
+  * **Subcontador 1**: Incluye varios electrodomésticos de la cocina. Concretamente el lavaplatos, el horno y el microondas.
+  * **Subcontador 2**: Hace referencia al lavadero e incluye la lavadora, la secadora, un refrigerador y la luz.
+  * **Subcontador 3**: Mide el consumo del calentador de agua y el aire acondicionado.
+
+# PREPARACIÓN DE LOS DATOS
+
+En este apartado se manipularán los datos para evitar problemas de formato o valores incorrectos que induzcan a error, etc.
+
+## LIMPIEZA DE DATOS
+
+En primer lugar limpiamos los datos.
+
+### VALORES INCORRECTOS
+
+Aquí tratamos de identificar los valores fuera de rango o valores que no tengan sentido para nuestras variables. Mostramos un resumen estadístico de los datos:
+
+```{r}
+#Resumen datos
+summary(DF.Data)
+```
+
+No tenemos valores duplicados ni erróneos.
+
+### VALORES DUPLICADOS
+
+Revisamos si existen valores duplicados para ambos conjuntos de datos:
+
+```{r}
+#Datos duplicados
+sprintf('Datos duplicados: %s',unique(duplicated(DF.Data)))
+```
+
+No tenemos ninguna fila repetida.
+
+### CAMBIO DE CLASE
+
+Se cambia el formato de la variable tiempo de *character* a formato fecha.
+
+```{r,warning=FALSE}
+#Se combinan los atributos fecha y tiempo en una única columna
+DF.Data <-cbind(DF.Data,paste(DF.Data$Date,DF.Data$Time), stringsAsFactors=FALSE)
+colnames(DF.Data)[8] <- 'Fecha'
+#Le damos formato de fecha POSIXct
+DF.Data$Fecha<-as.POSIXct(DF.Data$Fecha, "%Y/%m/%d %H:%M:%S")
+#Asignamos zona horaria
+attr(DF.Data$Fecha, "tzone") <- "Europe/Paris"
+#Movemos la columna a primera posición
+DF.Data <- DF.Data[,c(8,3,4,5,6,7)]
+```
+
+## RENOMBRAR VARIABLES
+
+Cambiamos el nombre de las variables:
+
+```{r}
+#Renombramos
+colnames(DF.Data) <- c('Fecha','SC1','SC2','SC3','PA','PR')
+```
+
+## VALORES FALTANTES
+
+A continuación se revisa si existen valores faltantes por algún tipo de error del subcontador al registrar los datos.
+
+En primer lugar encontramos todos los intervalos de tiempo omitidos mayores a 1 minuto ya que es la frecuencia de registro de los subcontadores.
+
+```{r}
+#Creamos las filas faltantes como Na
+DF.Data <- zoo(DF.Data[,-1],DF.Data[,1])
+DF.Data <- merge(DF.Data,zoo(,seq(start(DF.Data),end(DF.Data),by="min")), all=TRUE)
+DF.Data <- data.frame(index(DF.Data), as.data.frame(DF.Data))
+```
+
+```{r include=FALSE}
+#Renombramos
+colnames(DF.Data) <- c('Fecha','SC1','SC2','SC3','PA','PR')
+```
+
+De los intervalos sin datos encontrados, visualizamos la duración de cada uno de ellos:
+
+```{r}
+FUN.Outliers <- function(DF){
+  #Función rle+is.na para averiguar cuantos Na consecutivos tenemos y qué posiciones ocupan
+  Num_Na <- rle(is.na(DF[, 2]))
+  #Posición de los intervalos de tiempo con Na
+  n<-1
+  for(i in 1:length(Num_Na$lengths)){
+    if(Num_Na$values[i]){
+          Num_Na$index[n] <- sum(Num_Na$lengths[1:(i-1)])+1
+          n <- n+1
+    }
+  }
+  #Gráfico valores faltantes
+  lab_dates<-0
+  lab_dates[1:71]<-''
+  Num_Na$Days <- Num_Na$lengths[Num_Na$values]/60
+  Num_Na$Date <- DF[Num_Na$index,'Fecha']
+  lab_dates[Num_Na$Days>2] <- Num_Na$Date[Num_Na$Days>2] %>% as.Date(format='%Y-%m') %>% as.character()
+  Num_Na$bar <- barplot(names=lab_dates,height=Num_Na$Days,
+          col='lightblue',
+          las=2,cex.names=0.6,
+          # xlab="Fecha Inicio Datos Faltantes", 
+          ylab="Intervalo de Tiempo sin Datos (Horas)", 
+          main="Inicio y Duración de la Ausencia de Registros")+
+  abline(h=2,col='red')+
+  text('2 Horas', x=2,y=8,col='red')
+  plot <- recordPlot()
+  return(plot)
+}
+
+```
+
+
+
+```{r Na, fig.cap="Duración de los períodos sin registro de datos.",fig.width=10,fig.height=4}
+#Se muestra gráfico
+PLOT.Outliers <- FUN.Outliers(DF.Data)
+PLOT.Outliers
+```
+
+Se observa que tan solo existen 7 periodos de tiempo en que se ha dejado de registrar datos por más de 2 horas. Además, el mayor período de tiempo es de unos 5 días. En consecuencia, se decide tomar el siguiente criterio:
+
+* Para aquellos rangos de tiempo sin datos menores a 2 horas se interpolará linealmente entre los dos extremos.
+
+* Para el resto de casos, se tomarán los datos de la semana anterior.
+
+
+```{r}
+FUN.FillOutliers <- function(DF){
+  #Función rle+is.na para averiguar cuantos Na consecutivos tenemos y qué posiciones ocupan
+  Na <- rle(is.na(DF[, 2]))
+  #Vector Posiciones donde empiezan los Na
+  Na_positions <- (1:sum(Na$values*1))*0
+  #Número de Na consecutivos a partir de la posición Na_positions
+  Na_length <- (1:sum(Na$values*1))*0
+  #Se inicializa contador
+  n <- 1
+  #Loop para dar valores a los vectores creados
+  for(i in 1:length(Na$lengths)){
+    if(Na$values[i]){
+      Na_positions[n] <- sum(Na$lengths[1:(i-1)])+1
+      Na_length[n] <- Na$lengths[i]
+      n <- n+1
+    }
+  }
+  #Horas a partir de las cuales se utiliza un criterio u otro para rellenar los Na
+  horas_criterio <- 2
+  for(i in 1:length(Na_positions)){
+    #Primera posición de una serie de Na consecutivos
+    start <- Na_positions[i]
+    #Úiltima posición de una serie de Na consecutivos
+    end <- Na_positions[i]+Na_length[i]-1
+    #Se llenan los valores Na para >criterio. Valores iguales a los de la semana pasada.
+    if(Na_length[i]>horas_criterio*60){
+      #Posición de los datos correspondientes a la semana anterior al primer Na
+      start_L <- which(DF[,'Fecha']==(DF[start,'Fecha']-weeks(1)))
+      #Posición de los datos correspondientes a la semana anterior al último Na
+      end_L <- which(DF[,'Fecha']==(DF[end,'Fecha']-weeks(1)))
+      #Se substituyen los Na con valores de la semana pasada
+      DF[start:end,2:6] <- DF[start_L:end_L,2:6]
+    #Se llenan los valores Na para <criterio. Valores interpolados entre los dos extremos.
+    } else{
+      #Interpolación
+      DF[(start-1):(end+1),2:6]<-na_interpolation(DF[(start-1):(end+1),2:6])
+      }
+    }
+return(DF)
+}
+```
+```{r}
+#Se aplica la función para completar los datos
+DF.Data<- FUN.FillOutliers(DF.Data)
+```
+
+## UNIDADES
+
+Con el objetivo de unificar las unidades, se transformará la potencia en kW a energía en kW·h multiplicando por el intervalo de tiempo de 1 minuto. De esta forma los registros de los subcontadores serán comparables a los datos referentes a la energía activa y reactiva total.
+
+```{r}
+#Pasamos la potencia de kW a W
+DF.Data[,c('EA','ER')] <- 1/60*DF.Data[,c('PA','PR')]
+DF.Data[,c('SC1','SC2','SC3')] <- 1/1000*DF.Data[,c('SC1','SC2','SC3')]
+```
+
+## GRANULARIDAD MÍNIMA
+
+El objetivo del análisis y la granularidad requerida para dar respuesta a este no requiere de afinar hasta el minuto. Además, resulta imposible extraer tendencias tan detalladas que describan el comportamiento del usuario al minuto.
+
+Por este motivo se decide agrupar los datos por horas. Para ello se sumarán todos los registros realizados dentro de una misma hora.
+
+```{r}
+#Suma energías agrupando por horas
+DF.Data.Hour <-group_by(DF.Data,Fecha = floor_date(Fecha, unit = "hour")) %>% 
+     summarise(SC1 = sum(SC1),SC2=sum(SC2),SC3=sum(SC3),EA=sum(EA),ER=sum(ER))
+```
+
+## VARIABLES ADICIONALES
+
+A continuación se crean variables adicionales como el día de la semana y la estación del año correspondiente a cada fecha.
+
+```{r}
+#Devuelve el día de la semana dada una fecha
+FUN.GetWeekDay <- function(fecha) {
+  DS <- weekdays(fecha)
+  #Nombre de los días de la semana
+  DS[DS=='Monday'] <- 'Lunes'
+  DS[DS=='Tuesday'] <- 'Martes'
+  DS[DS=='Wednesday'] <- 'Miércoles'
+  DS[DS=='Thursday'] <- 'Jueves'
+  DS[DS=='Friday'] <- 'Viernes'
+  DS[DS=='Saturday'] <- 'Sábado'
+  DS[DS=='Sunday'] <- 'Domingo'
+  #Cambio clase a factor en orden
+  DS <- factor(DS, levels = c('Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'))
+  return(DS)
+}
+```
+
+
+```{r}
+#Función que devuelve la estación del año dada la fecha
+FUN.GetSeason <- function(DATES) {
+    WS <- as.Date("2007-12-21",  format = "%Y-%m-%d") # Invierno
+    SE <- as.Date("2007-03-21",  format = "%Y-%m-%d") # Primavera
+    SS <- as.Date("2007-06-21",  format = "%Y-%m-%d") # Verano
+    FE <- as.Date("2007-09-21",  format = "%Y-%m-%d") # Otoño
+
+    # Convertimos fechas al año 2007
+    d <- as.Date(strftime(DATES, format="2007-%m-%d"))
+
+    ifelse (d >= WS | d < SE, "Invierno",
+      ifelse (d >= SE & d < SS, "Primavera",
+        ifelse (d >= SS & d < FE, "Verano", "Otoño")))
+}
+```
+
+```{r,warning=FALSE}
+#Se aplican las funciones creadas anteriormente
+DF.Data.Hour$DiaSemana <- FUN.GetWeekDay(DF.Data.Hour$Fecha)
+DF.Data.Hour <- as.data.frame(DF.Data.Hour)
+#Nombre Meses
+CHA.Mes <- c('Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio',
+         'Agosto','Septiembre','Octubre','Noviembre','Diciembre')
+#Nombre subcontadores
+CHA.SC <- c('SC1 Cocina','SC2 Lavandería','SC3 Calentador y AC')
+```
+
+## DATOS A DISTINTAS GRANULARIDADES
+
+En esta sección manipularemos el dataset para abordar el análisis a distintas escalas de tiempo. Se agruparán los datos ajustando la granularidad a horas, días, meses y años.
+
+* **Datos por Días:**
+
+Se agrupan los datos según los días. Cada día contiene 24 muestras correspondientes a las 24 horas del día. El valor asociado a cada día es la suma de las energías registradas a cada hora.
+
+También se calcula la evolución de la media y la varianza en el tiempo para su posterior análisis.
+
+```{r}
+#Suma energías y media potencia agrupando por horas
+DF.Data.Daily <-group_by(DF.Data.Hour,Fecha = floor_date(Fecha, unit = "day")) %>% 
+     summarise(SC1 = sum(SC1),SC2=sum(SC2),SC3=sum(SC3),
+               EA=sum(EA),ER=sum(ER)) %>% as.data.frame()
+DF.Data.Daily$DiaSemana <- FUN.GetWeekDay(DF.Data.Daily$Fecha)
+DF.Data.Daily$Estacion <- FUN.GetSeason(DF.Data.Daily[,1])  %>% factor(levels=c('Invierno','Primavera','Verano','Otoño'))
+#Se calcula la evolución de la media y la variancia
+for(i in 1:length(DF.Data.Daily[,1])){
+  DF.Data.Daily$EAm[i] <- mean(DF.Data.Daily$EA[1:i])
+  DF.Data.Daily$EAsd[i] <- sd(DF.Data.Daily$EA[1:i])
+  DF.Data.Daily$ERm[i] <- mean(DF.Data.Daily$ER[1:i])
+  DF.Data.Daily$ERsd[i] <- sd(DF.Data.Daily$ER[1:i])
+  DF.Data.Daily$SC1m[i] <- mean(DF.Data.Daily$SC1[1:i])
+  DF.Data.Daily$SC1sd[i] <- sd(DF.Data.Daily$SC1[1:i])
+  DF.Data.Daily$SC2m[i] <- mean(DF.Data.Daily$SC2[1:i])
+  DF.Data.Daily$SC2sd[i] <- sd(DF.Data.Daily$SC2[1:i])
+  DF.Data.Daily$SC3m[i] <- mean(DF.Data.Daily$SC3[1:i])
+  DF.Data.Daily$SC3sd[i] <- sd(DF.Data.Daily$SC3[1:i])
+}
+#Número de la Semana
+DF.Data.Daily$Semana <- week(DF.Data.Daily$Fecha)
+```
+
+* **Datos por Semanas:**
+
+Se agrupan los datos por semanas. Cada registro consistirá en la suma de las 24x7=168 horas de las que consta una semana.
+
+```{r}
+#Suma energías y media potencia agrupando por horas
+DF.Data.Weekly <-group_by(DF.Data.Hour,Fecha = floor_date(Fecha, unit = "week")) %>% 
+     summarise(SC1 = sum(SC1),SC2=sum(SC2),SC3=sum(SC3),
+               EA=sum(EA),ER=sum(ER)) %>% as.data.frame()
+DF.Data.Weekly$Estacion <- FUN.GetSeason(DF.Data.Weekly[,1]) %>% as.factor()
+```
+
+* **Datos por Meses:**
+
+Se agrupan los datos por meses. Cada registro contiene la suma de los valores energéticos registrados en un mismo mes.
+
+```{r}
+#Suma energías y media potencia agrupando por horas
+DF.Data.Monthly <-group_by(DF.Data.Hour,Fecha = floor_date(Fecha, unit = "month")) %>% 
+     summarise(SC1 = sum(SC1),SC2=sum(SC2),SC3=sum(SC3),
+               EA=sum(EA),ER=sum(ER)) %>% as.data.frame()
+```
+
+* **Datos por Años:**
+
+Finalmente, la mayor granularidad considerada será la correspondiente a agrupar los datos por años.
+
+```{r}
+#Suma energías y media potencia agrupando por horas
+DF.Data.Yearly <-group_by(DF.Data.Hour,Fecha = floor_date(Fecha, unit = "year")) %>% 
+     summarise(SC1 = sum(SC1),SC2=sum(SC2),SC3=sum(SC3),
+               EA=sum(EA),ER=sum(ER)) %>% as.data.frame()
+```
+
+# ANÁLISIS EXPLORATORIO
+
+En esta sección se graficarán las distintas variables que contiene el conjunto de datos utilizando distintas granularidades. El objetivo es diferenciar patrones a distintas escalas de tiempo y extraer la máxima información posible.
+
+Dividiremos la sección en tres partes según la granularidad escogida:
+
+* **Largo Plazo:** Se visualizarán datos a lo largo de uno o varios años al mismo tiempo.
+
+* **Medio Plazo:** Tratará de abarcar patrones que se dan a lo largo de las semanas.
+
+* **Corto Plazo:** El objetivo es averiguar si tenemos tendencias claras a lo largo de un día. Se realizarán visualizaciones con intervalos de tiempo de horas.
+
+## ANÁLISIS A LARGO PLAZO
+
+Se empezará explorando los datos por años, de manera que veamos tendencias más generales.
+
+### FRACCIÓN SOBRE EL TOTAL
+
+En primer lugar se mostrará la fracción de energía anual que registra cada uno de los subcontadores sobre el total de la energía activa utilizada en el hogar.
+
+```{r ProporcionAnual, fig.cap="Porcentaje sobre el total de la energía registrada por cada subcontador.",fig.width=8,fig.height=3}
+PLOT.LP.FracAnual <- filter(DF.Data.Yearly,year(Fecha)>2006) %>% gather(SubContador, value, SC1:SC3) %>% 
+ggplot(aes(x=factor(year(Fecha)), y=value/EA*100, fill=SubContador)) +
+    labs(x='Año', y='Proporción de la Energía') +
+    ggtitle('Fracción de energía registrada sobre el total de energía activa') +
+    geom_col(position = position_dodge())+
+    scale_x_discrete(name ="Año")+
+    scale_y_continuous(name ="Fracción Energía Sobre el Total [%]",limits = c(0,50),breaks=seq(0,50,10))+
+    theme(axis.text.x = element_text(color='black',size=10,angle=0),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_fill_discrete(name = "SubContador", labels = CHA.SC)+
+    geom_text(aes(label = round(value/EA*100,2),colour=SubContador),size=4,
+              position = position_dodge(width = 1),vjust=-0.5)+
+    guides(colour='none')
+PLOT.LP.FracAnual
+```
+
+Se observa una clara tendencia: **el subcontador 3 (calentador y aire acondicionado) gana protagonismo con el tiempo**. También hay una **reducción en el consumo del subcontador 2** referente a la lavandería, pero esta tendencia es débil y pasa más desapercibida.
+
+### DATOS HISTÓRICOS COMPLETOS
+
+Se mostrará una visión general de los datos en su totalidad. La intención del gráfico es ver las tendencias anuales. Por ello, se agruparán por semanas para evitar patrones semanales y diarios.
+
+```{r GeneralAnual, fig.cap="Energía registrada por los subcontadores agrupada por meses.",fig.width=10,fig.height=4}
+#Se recortan los datos evitando semanas incompletas
+PLOT.LP.GenAnual <- filter(DF.Data.Monthly,Fecha>="2006-12-18" & Fecha<"2010-11-22") %>% plot_ly(x = ~Fecha)
+PLOT.LP.GenAnual <- PLOT.LP.GenAnual %>% add_lines(y = ~EA, name = "Energía Activa")
+PLOT.LP.GenAnual <- PLOT.LP.GenAnual %>% add_lines(y = ~ER, name = "Energía Reactiva")
+PLOT.LP.GenAnual <- PLOT.LP.GenAnual %>% add_lines(y = ~SC1, name = "SC1 Cocina")
+PLOT.LP.GenAnual <- PLOT.LP.GenAnual %>% add_lines(y = ~SC2, name = "SC2 Lavandería")
+PLOT.LP.GenAnual <- PLOT.LP.GenAnual %>% add_lines(y = ~SC3, name = "SC3 Calentador y AC")
+PLOT.LP.GenAnual <- PLOT.LP.GenAnual %>% layout(
+    title = "Energía Registrada Mensualmente.",
+    xaxis = list(
+      rangeselector = list(
+        buttons = list(
+          list(
+            count = 1,
+            label = "1 Mes",
+            step = "month",
+            stepmode = "backward"),
+          list(
+            count = 6,
+            label = "6 Meses",
+            step = "6 months",
+            stepmode = "backward"),
+          list(
+            count = 1,
+            label = "1 Año",
+            step = "year",
+            stepmode = "todate"),
+          list(step = "all"))),
+
+      rangeslider = list(type = "date")),
+
+    yaxis = list(title = "Energía [kWh]"))
+
+PLOT.LP.GenAnual
+```
+
+Se puede observar que, **durante los periodos veraniegos, el consumo cae considerablemente mientras que invierno es el periodo que marca mayores picos**.
+
+Podríamos interpretar que el usuario de la vivienda pasa fuera gran parte de las vacaciones y deja de consumir. Se debe añadir que este período vacacional no siempre ocurre exactamente durante los mismos meses.
+
+**La energía reactiva o perdida es independiente del consumo total de energía**. Por este motivo, la proporción de energía perdida sobre el total es significativa en temporadas de bajo consumo como los periodos vacacionales.
+
+### DISTRIBUCIÓN ENERGÍA POR MESES
+
+Se visualizará la distribución del consumo a lo largo de los meses. En este caso, se agruparán los datos por semanas por los siguientes motivos:
+
+* Una granularidad menor nos plasmaría las diferencias entre los distintos días de la semana (lunes, martes, fin de semana) y aparecerían muchos outliers.
+
+* No se esperan grandes diferencias entre las distintas semanas de un mismo mes.
+
+* Tenemos aproximadamente 16 semanas para cada mes considerando todos los años.
+
+```{r BoxplotEstacional, fig.cap="Energía semanal registrada por los subcontadores a lo largo del año.",fig.width=10,fig.height=4}
+#Se recortan los datos evitando semanas incompletas
+PLOT.LP.DistrAnual <- filter(DF.Data.Weekly,Fecha>="2007-01-01" & Fecha<"2010-11-01") %>% 
+gather(SubContador, Energia, SC1:SC3) %>%
+    ggplot(aes(x=as.factor(month(Fecha)),fill=SubContador,y=Energia)) +
+    geom_boxplot()+
+    ggtitle('Evolución de la Energía por Meses. Datos Agrupados por Semanas')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=0,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_x_discrete(name='Mes',labels=CHA.Mes)+
+    scale_y_continuous(name ="Energía Semanal [kWh]",limits=c(0,120),breaks=seq(0,120,20))+
+    scale_fill_discrete(name = "SubContador", labels = CHA.SC)
+PLOT.LP.DistrAnual
+```
+
+De nuevo vemos en evidencia la caída de consumo durante los meses de verano. Además, se observa que las cajas del **subcontador 3 muestran una mayor dispersión** de resultados que los otros dos subcontadores.
+
+### MEDIA Y VARIANZA DE LA ENERGÍA ACTIVA Y REACTIVA TOTAL
+
+Se visualiza la evolución de la media y la varianza de la energía activa y reactiva con el tiempo:
+
+```{r}
+#Función para agrupar los datos
+FUN.AgrupacionE <- function(DF){
+  #Energía Activa
+  DF1 <- gather(DF,Ename,E,EAm,EAsd)
+  DF1$Energia <- 'Activa'
+  DF1$Estadistico[DF1$Ename=='EAm'] <- 'Media'
+  DF1$Estadistico[DF1$Ename=='EAsd'] <- 'Varianza'
+  #Energía Reactiva
+  DF2 <- gather(DF,Ename,E,ERm,ERsd)
+  DF2$Energia <- 'Reactiva'
+  DF2$Estadistico[DF2$Ename=='ERm'] <- 'Media'
+  DF2$Estadistico[DF2$Ename=='ERsd'] <- 'Varianza' 
+  #Se unen data frames
+  a <- rbind(DF1[,c('Fecha','E','Energia','Estadistico')],
+             DF2[,c('Fecha','E','Energia','Estadistico')]) %>% as.data.frame()
+  return(a)
+}
+```
+
+```{r MediaE, fig.cap="Estadísticos de la energía activa y reactiva total.",fig.width=8,fig.height=4}
+#Se recortan los datos evitando meses incompletos
+PLOT.LP.Emsd <- filter(DF.Data.Daily,Fecha>="2007-01-01" & Fecha<"2010-11-01") %>% FUN.AgrupacionE() %>%
+    ggplot(aes(x=as.Date(Fecha), y=E,color=Energia,linetype=Estadistico)) +
+    geom_line(size=1)+
+    ggtitle('Energía Activa y Reactiva. Evolución de la Media y Varianza.')+
+    scale_x_date(name ="Mes y Año", date_labels = "%b %y", date_breaks = "1 month",
+                 date_minor_breaks = "1 month")+
+    scale_y_continuous(name ="Energía Mensual [kWh]",limits = c(0,50),breaks = seq(0,50,10))+
+    theme(axis.text.x = element_text(color='black',size=8,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))
+PLOT.LP.Emsd
+```
+
+La media fluctúa ligeramente alrededor de los 26.5 kWh debido a la diferencia del consumo energético entre verano e invierno. Estas fluctuaciones son cada vez menores, lo cual significa que **no existe ninguna tendencia que indiquen un aumento o disminución del consumo con el tiempo**. Simplemente el tiempo considerado no es suficiente para dejar de ver las fluctuaciones debidas a la diferencia de consumo entre invierno y verano.
+
+La varianza disminuye con el tiempo. Esto significa que, considerando largos periodos de tiempo donde se pierda la estacionalidad anual, el consumo medio tiende a ser constante.
+
+### MEDIA Y VARIANZA REGISTRADA POR LOS SUBCONTADORES
+
+Realizamos el mismo ejercicio con el registro de energía proveniente de los subcontadores:
+
+```{r}
+#Función para agrupar los datos
+FUN.AgrupacionSC <- function(DF){
+  DF1 <- gather(DF,SC,E,SC1m,SC1sd)
+  DF1$SubContador <- 'SC1 Cocina'
+  DF1$Estadistico[DF1$SC=='SC1m'] <- 'Media'
+  DF1$Estadistico[DF1$SC=='SC1sd'] <- 'Varianza' 
+  DF2 <- gather(DF,SC,E,SC2m,SC2sd)
+  DF2$SubContador <- 'SC2 Lavanderia'
+  DF2$Estadistico[DF2$SC=='SC2m'] <- 'Media'
+  DF2$Estadistico[DF2$SC=='SC2sd'] <- 'Varianza' 
+  DF3 <- gather(DF,SC,E,SC3m,SC3sd)
+  DF3$SubContador <- 'SC3 Calentador y AC'
+  DF3$Estadistico[DF3$SC=='SC3m'] <- 'Media'
+  DF3$Estadistico[DF3$SC=='SC3sd'] <- 'Varianza' 
+  a <- rbind(DF1[,c('Fecha','E','SubContador','Estadistico')],
+             DF2[,c('Fecha','E','SubContador','Estadistico')],
+             DF3[,c('Fecha','E','SubContador','Estadistico')]) %>% as.data.frame()
+  return(a)
+}
+```
+
+```{r MediaSC, fig.cap="Estadísticos del registro de subcontadores.",fig.width=10,fig.height=4}
+#Visualización anual. Agrupación mensual
+#Se recortan los datos evitando meses incompletos
+PLOT.LP.SCmsd <- filter(DF.Data.Daily,Fecha>="2007-01-01" & Fecha<"2010-11-01") %>% FUN.AgrupacionSC() %>%
+    ggplot(aes(x=as.Date(Fecha), y=E,color=SubContador,linetype=Estadistico)) +
+    geom_line(size=1)+
+    ggtitle('Energía registrada por los SubContadores. Evolución de la Media y Varianza.')+
+    scale_x_date(name ="Fecha", date_labels = "%b %y", date_breaks = "1 month",
+                 date_minor_breaks = "1 month")+
+    scale_y_continuous(name ="Energía [kWh]",limits = c(0,12),breaks = seq(0,12,1))+
+    theme(axis.text.x = element_text(color='black',size=9,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))
+PLOT.LP.SCmsd
+```
+
+El gráfico resulta de gran utilidad para visualizar la tendencia de las señales. Claramente el subcontador 3 muestra una tendencia ascendente, por lo que deja en evidencia que **el consumo por parte del calentador y el AC aumenta con el tiempo**. Faltaría saber la razón de este aumento, podría ser la disminución de la eficiencia de dichos dispositivos o que simplemente los hábitos de consumo del usuario cambian.
+
+**Los registros del subcontador 2 disminuyen con el tiempo** aunque esta tendencia es mucho más sutil que en el caso anterior.
+
+**En cuanto al subcontador 1, vemos una curva plana** por lo que interpretamos que su media se mantiene constante a lo largo del tiempo. 
+
+**La varianza es constante en los tres subcontadores** con algunas variacionoes irregulares en el subcontador 3.
+
+## ANÁLISIS A MEDIO PLAZO
+
+Hasta ahora se han visualizado los datos por meses o años y se han visualizado patrones y tendencias que suceden a lo largo del año, omitiendo otras estacionalidades a menor escala. En esta sección nos marcamos como objetivo extraer tendencias y patrones a la escala de días. Se verá la evolución semanal, diferencias entre los fines de semana y el resto de días, dependencia de estos patrones según qué semana tomemos, si existe una semana modelo o hay mucha dispersión a lo largo de los meses... se tratará de dar respuesta a todas estas preguntas que nos planteamos. 
+
+### DISTRIBUCIÓN POR DÍAS DE LA SEMANA
+
+El siguiente gráfico de cajas tiene como objetivo mostrar las diferencias en el consumo según el día de la semana en que nos situemos:
+
+```{r}
+#Función para agrupar los datos
+FUN.AgrMen <- function(DF){
+a <-group_by(DF,month(Fecha,label = T),DiaSemana) %>%
+    summarise(SC101=quantile(SC1,0.1),SC1_Cocina=quantile(SC1,0.5),SC109=quantile(SC1,0.95),
+              SC201=quantile(SC2,0.1),SC2_Lavanderia=quantile(SC2,0.5),SC209=quantile(SC2,0.95),
+              SC301=quantile(SC3,0.1),SC3_CalentadorAC=quantile(SC3,0.5),SC309=quantile(SC3,0.95))
+colnames(a)[1]<-'Mes'
+a$Mes <- factor(a$Mes,levels=unique(a$Mes))
+a1 <- gather(a,SC01, Energia01, SC101,SC201,SC301)
+a5 <- gather(a,SubContador, Energia05, SC1_Cocina,SC2_Lavanderia,SC3_CalentadorAC)
+a9 <- gather(a,SC09, Energia09, SC109,SC209,SC309)
+a <- cbind(a1,a5[,c('SubContador','Energia05')],a9[,c('SC09','Energia09')]) %>% as.data.frame()
+return(a)
+}
+```
+
+```{r PercentilesDia, fig.cap="Mediana de la energía registrada por los subcontadores y franjas asociadas a los percentiles 10-95 %. Datos agrupados por días.",warning=FALSE,fig.width=10,fig.height=6}
+PLOT.CP.PercDias <- FUN.AgrMen(DF.Data.Daily) %>% 
+    ggplot(aes(x=DiaSemana,y=Energia05,frame=Mes,color=SubContador,fill=SubContador, group=1)) +
+    geom_line(size=0.9)+
+    geom_ribbon(aes(ymin=Energia01,ymax=Energia09), alpha = 0.3)+
+    ggtitle('Energía por Días Registrada por los SubContadores.')+
+    theme(axis.text.x = element_text(color='black',size=8,angle=0,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Días [kWh]")+
+    scale_x_discrete(name ="Días de la Semana")
+PLOT.CP.PercDias <- ggplotly(PLOT.CP.PercDias)
+PLOT.CP.PercDias
+```
+
+Se observan distintos patrones según el subcontador considerado:
+
+* **Cocina** (SubContador 1): El consumo realizado en la cocina muestra un **mayor gasto energético los fines de semana**. Sin embargo, no hay patrones claros a destacar además de la diferenciación entre los días de entre semana y los fines de semana. Tal vez los fines de semana sea habitual hacer comidas más elaboradas con invitados o cocinar para el resto de la semana.
+
+* **Lavandería** (SubContador 2): A excepción del periodo veraniego, el resto de estaciones del año muestran dos o tres días donde repunta el consumo. Todo apunta a que podrían hacer la colada estos días de la semana de forma regular. Podríamos asumir que este **mayor consumo se da el martes o miércoles y el sábado o domingo**.
+
+Por supuesto existen ciertas semanas en que la lavandería se ha usado fuera de este horario más habitual dependiendo de las necesidades puntuales que hayan podido surgir. Sin embargo, se observa que es especialmente **poco habitual el uso de la lavandería los lunes y los jueves**.
+
+* **AC y Calentador** (SubContador 3): El uso del calentador de agua y AC son bastante **regulares e independientes del día de la semana**. Aún así, se observa un **mayor consumo los sábados**. Podría estar **relacionado con los demás subcontadores**: actividades como lavar la ropa o cocinar requieren de agua caliente.
+
+## ANÁLISIS A CORTO PLAZO
+
+En esta sección veremos los **datos por horas**. De esta forma podremos observar los hábitos y tendencias del usuario a lo largo del día.
+
+Para visualizar esta información realizaremos dos tipos de gráficos:
+
+* **Distribución general:** Utilizaremos los percentiles 20% 50% y 90% agrupados por horas y días de la semana para visualizar una idea general sobre las tendencias a lo largo de la totalidad de los datos. Este gráfico nos daría una idea de cómo sería la semana modelo.
+
+* **Distribución más reciente:** debido a la fina granularidad, el intervalo de tiempo a considerar no debe ser demasiado extenso o se capturarán otras estacionales relacionadas con los periodos semanales e incluso anuales. Por ello, se visualizarán los datos de las últimas semanas de las que disponemos (noviembre 2010).
+
+### DISTRIBUCIÓN POR HORAS A LO LARGO DE LA SEMANA
+
+En primer lugar realizaremos un gráfico general para ver como se distribuye el consumo energético a lo largo del día. Se mostrará la mediana así como los percentiles del 20% y 90%. Este gráfico nos dará la idea más parecida a una semana modelo.
+
+```{r}
+#Función para agrupar los datos
+FUN.AgrSem <- function(DF){
+a <-group_by(DF,hour(Fecha),DiaSemana) %>%
+    summarise(SC101=quantile(SC1,0.1),SC1_Cocina=quantile(SC1,0.5),SC109=quantile(SC1,0.9),
+              SC201=quantile(SC2,0.1),SC2_Lavanderia=quantile(SC2,0.5),SC209=quantile(SC2,0.9),
+              SC301=quantile(SC3,0.1),SC3_CalentadorAC=quantile(SC3,0.5),SC309=quantile(SC3,0.9))
+colnames(a)[1]<-'Hora'
+a$Hora <- factor(a$Hora,levels=unique(a$Hora))
+a1 <- gather(a,SC01, Energia01, SC101,SC201,SC301)
+a5 <- gather(a,SubContador, Energia05, SC1_Cocina,SC2_Lavanderia,SC3_CalentadorAC)
+a9 <- gather(a,SC09, Energia09, SC109,SC209,SC309)
+a <- cbind(a1,a5[,c('SubContador','Energia05')],a9[,c('SC09','Energia09')]) %>% as.data.frame()
+return(a)
+}
+```
+
+```{r PercentilesHora, fig.cap="Mediana de la energía registrada por los subcontadores y franjas asociadas a los percentiles 10-90 %. Datos agrupados por horas.",warning=FALSE,fig.width=10,fig.height=6}
+PLOT.CP.PercHoras <-FUN.AgrSem(DF.Data.Hour) %>% 
+    ggplot(aes(x=Hora,y=Energia05,frame=DiaSemana,color=SubContador,fill=SubContador, group=1)) +
+    geom_line(size=0.9)+
+    geom_ribbon(aes(ymin=Energia01,ymax=Energia09), alpha = 0.3)+
+    ggtitle('Energía por Horas Registrada por los SubContadores.')+
+    theme(axis.text.x = element_text(color='black',size=8,angle=0,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Horas [kWh]",limit=c(0,1.5),breaks=seq(0,1.5,0.25))+
+    scale_x_discrete(name ="Hora")
+PLOT.CP.PercHoras <- ggplotly(PLOT.CP.PercHoras)
+PLOT.CP.PercHoras
+```
+
+* **SubContador 1: Cocina**
+
+  * Los valores mínimos y medios son prácticamente nulos.
+
+  * Solo los valores cercanos al máximo muestran consumos significativos. Habitualmente a mediodía y noche, horas del almuerzo y cena.
+
+  * Los fines de semana muestran un mayor consumo, manteniendo el pico de consumo entre mediodía y noche de forma constante.
+
+* **SubContador 2: Lavandería**
+
+  * Como se comentó en la figura \@ref(fig:PercentilesDia), el consumo de la lavandería repunta los martes/miércoles y los sábados/domingos.
+
+  * Podemos interpretar que se utiliza la lavadora y/o secadora dos veces a la semana.
+
+* **SubContador 3: Calentador y AC**
+
+  * Sus valores muestran una clara dependencia con el resto de subcontadores.
+
+  * Los valores máximos son parecidos para todos los días, no distingue entre fin de semana y el resto de días.
+
+  * Los valores medios cambian significantivamente para el fin de semana. Los aumentos de consumo coinciden con los indicados para los otros dos subcontadores.
+
+  * Es con diferencia el subcontador que mayores consumos registra. Incluso los valores mínimos están por encima del resto de subcontadores.
+
+### DISTRIBUCIÓN ÚLTIMA SEMANA
+
+Se visualizan los datos de las últimas semanas de las que disponemos:
+
+```{r}
+#Función para crear gráfico semanal
+FUN.WeekPlot <- function(DF,start){
+  end <- start+weeks(1)
+  DF <- filter(DF,Fecha>=start & Fecha<end)
+  DF$Hora <- hour(DF$Fecha)
+  DiaOrden <- DF$DiaSemana %>% unique() %>% as.character()
+  DF$DiaSemana <- factor(DF$DiaSemana,levels=DiaOrden)
+  DF <- gather(DF,SubContador, Energia, SC1:SC3) %>% as.data.frame()
+  DF$SubContador[DF$SubContador=='SC1'] <- 'SC1 Cocina'
+  DF$SubContador[DF$SubContador=='SC2'] <- 'SC2 Lavandería'
+  DF$SubContador[DF$SubContador=='SC3'] <- 'SC3 Calentador y AC'
+  plot <- ggplot(DF,aes(x=Hora,fill=SubContador,y=Energia,frame=DiaSemana)) +
+    geom_col(position = position_identity(),alpha=0.5,size=0.1)+
+    ggtitle(sprintf('Consumo por Horas. Semana del %s al %s',start,end-days(1)))+
+    theme(axis.text.x = element_text(color='black',size=8,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Hora [kWh]",limits=c(0,2),breaks=seq(0,4,0.25))+
+    scale_x_continuous(name ='Hora y Día de la Semana.',limits=c(0,23),breaks=seq(0,23,1))
+  plot <- ggplotly(plot)
+  plot <- plotly_build(plot)
+return(plot)
+}
+```
+
+```{r PUltimaSemana2010, fig.cap="Distribución por horas y días de la semana. Penúltima semana (15/11/2010).",fig.width=8,fig.height=4}
+#Visualización Semana. Agrupación por Horas.
+PLOT.CP.PUltSem <- FUN.WeekPlot(DF.Data.Hour,as.Date('2010-11-15'))
+PLOT.CP.PUltSem
+```
+
+```{r UltimaSemana2010, fig.cap="Distribución por horas y días de la semana. Última semana (22/11/2010).",fig.width=8,fig.height=4}
+#Visualización Semana. Agrupación por Horas.
+PLOT.CP.UltSem <- FUN.WeekPlot(DF.Data.Hour,as.Date('2010-11-22'))
+PLOT.CP.UltSem
+```
+
+Se han visualizado las últimas semanas de las que disponemos. Si comparamos los gráficos \@ref(fig:PUltimaSemana2010) y \@ref(fig:UltimaSemana2010) con \@ref(fig:PercentilesHora), podemos ver que la última semana mantiene algunos patrones indicados en la semana modelo que nos muestran los porcentiles:
+
+* La lavandería tiene un consumo destacado el miércoles (\@ref(fig:UltimaSemana2010)) y el sábado (\@ref(fig:PUltimaSemana2010)).
+
+* La cocina destaca el sábado (\@ref(fig:PUltimaSemana2010)) como la semana modelo. Sin embargo, tenemos unos valores atípicos a las 19 y 20 horas del lunes en la última semana de la figura \@ref(fig:UltimaSemana2010).
+
+* El calentador y AC muestran rangos más amplios en la semana modelo y, por lo tanto, cualquier semana los respeta más fácilmente. El día de mayor discrepancia es el domingo mostrado en \@ref(fig:PUltimaSemana2010).
+
+# MODELADO Y PREDICCIÓN
+
+El objetivo en esta sección es encontrar el mejor modelo que nos permita predecir el consumo eléctrico y calcular el error asociado.
+
+## PLANTEAMIENTO
+
+La elección del modelo, la selección de datos, etc. dependerá del objetivo que nos propongamos, las caracterización de los datos y la granularidad considerada.
+
+* **Modelado**
+
+Nuestros datos son **NO estacionarios** pues sus propiedades dependen del tiempo en que nos situemos, es decir, tienen componentes estacionales y tendencias asociadas.
+
+Por este motivo, se descartarán los modelos basados en la descripción de las autocorrelaciones (*ARIMA models*). Se opta por utilizar **modelos lineales (TSLM)** y los llamados ***Exponential Smoothing Models***, concretamente el algoritmo ***Holt-Winters***. 
+
+* **Partición y Verificación**
+
+Utilizaremos **una partición de los datos para modelar** (*train*) **y otra para evaluar el modelo** (*test*). Se realizará una predicción a partir de los datos *train* y se evaluará su calidad evaluando las métricas de error sobre el conjunto *test*.
+
+* **Intervalo de tiempo considerado**
+
+Para cada granularidad se decidirá tomar un periodo de tiempo u otro para entrenar el modelo. Para granularidades finas se considerará períodos más cortos y, en cualquier caso, este período siempre será el más actual posible.
+
+* **Variables consideradas**
+
+Se analizarán todos los datos para todas las granularidaes a excepción de la energía reactiva. Esta última no es controlada por el usuario y, por lo tanto, tan solo se evaluará cual es la tendencia de esta a largo plazo. El objetivo será controlar que esta no vaya en aumento con el tiempo.
+
+### GRANULARIDAD DE LAS PREDICCIONES
+
+Dados los objetivos iniciales del proyecto, es necesario realizar predicciones a distintas granularidades. Por este motivo, se dividirá el análisis en tres subapartados:
+
+* **Predicciones a largo plazo:** el propósito de este modelo es predecir el consumo del usuario a lo largo del año agrupando los datos por meses.
+
+* **Predicciones a medio plazo:** el modelo debe ser capaz de proporcionar información sobre el consumo en los próximos días o semanas agrupando los datos por días.
+
+* **Predicciones a corto plazo:** se destina a predecir el consumo de las siguientes horas o días con información detallada hasta la hora.
+
+## MODELADO A LARGO PLAZO
+
+En esta sección se construirá el modelo capaz de predecir el consumo a largo plazo.
+
+### PREPARACIÓN DE LOS DATOS
+
+Trataremos los datos según el año al que pertenezcan de la siguiente forma:
+
+* **Datos 2006:** contiene muy pocos datos, empezando el dataset en 16 de diciembre. Sumado a que son los datos más antiguos, podemos considerar la eliminación de estos. No formarán parte del análisis.
+
+* **Datos 2007, 2008 y 2009:** se utilizarán como subconjunto *train* y nos permitirán ajustar y preparar nuestro modelo.
+
+* **Datos 2010:** será nuestro subconjunto *test*. Son los datos más actuales que tenemos y, por lo tanto, los más indicados para ajustar nuestro modelo.
+
+Por los motivos mencionados anteriomente, se tomará el data set con los **datos agrupados por meses**. Además, recortamos entre las fechas 01/01/2007 y 31/10/2010 para **evitar datos de meses incompletos**.
+
+```{r}
+#Creamos objeto time-series Train
+TS.LP <- filter(DF.Data.Monthly,Fecha>="2007-01-01" & Fecha <"2010-11-01")[,2:6] %>% 
+  ts(start=2007,end=c(2010,10),frequency = 12)
+#Etiquetas eje X
+CHA.Yearly <- c('Ene 07','Feb 07','Mar 07','Abr 07','May 07','Jun 07','Jul 07','Ago 07','Sep 07','Oct 07','Nov 07',
+                'Dic 07',
+          'Ene 08','Feb 08','Mar 08','Abr 08','May 08','Jun 08','Jul 08','Ago 08','Sep 08','Oct 08','Nov 08','Dic 08',
+          'Ene 09','Feb 09','Mar 09','Abr 09','May 09','Jun 09','Jul 09','Ago 09','Sep 09','Oct 09','Nov 09','Dic 09',
+          'Ene 10','Feb 10','Mar 10','Abr 10','May 10','Jun 10','Jul 10','Ago 10','Sep 10','Oct 10')
+```
+
+### ENERGÍA ACTIVA
+
+#### DESCOMPOSICIÓN
+
+De la figura \@ref(fig:MediaE) ya pudimos interpretar que la tendencia de la energía activa a largo plazo es mantenerse constante en media. Por esta razón se espera obtener una componente de tendencia prácticamente plana.
+
+```{r EAAnualDesc, fig.cap="Descomposición a largo plazo de la energía activa",fig.width=8,fig.height=6}
+#Gráfico Descomposición EA
+PLOT.LP.EA.Dec <- stl(TS.LP[,'EA'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Energía Activa. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía Mensual [kWh]")+
+    scale_x_continuous(name ="Mes",limit=c(2007,2011),breaks=seq(2007,2011-3/12,1/12),
+                       labels=CHA.Yearly,minor_breaks = NULL)
+PLOT.LP.EA.Dec
+```
+
+Efectivamente la componente *trend* es la menor de las tres con diferencia. Los resultados muestran una componente estacional dominante con componentes aleatorias significativas, destacando la de agosto de 2008. Podría ser que el usuario pasase ese mes completo de vacaciones a diferencia de otros años.
+
+#### MODELADO
+
+Visualicemos los modelos obtenidos mediante Holt-Winters y TSLM:
+
+##### HOLT-WINTERS
+
+```{r}
+#Función modelos HW
+FUN.HW.Modelo <- function(TS,h){
+  HW <- list()
+  HW[[1]] <- HoltWinters(TS,beta=F,gamma=F) %>% forecast(h=h,level=c(seq(10,90,10),95))
+  HW[[2]] <- HoltWinters(TS,gamma=F) %>% forecast(h=h,level=c(seq(10,90,10),95))
+  HW[[3]] <- HoltWinters(TS) %>% forecast(h=h,level=c(seq(10,90,10),95))
+  return(HW)
+}
+```
+
+```{r}
+#Función modelos TSLM
+FUN.TSLM.Modelo <- function(TS,h){
+  TSLM <- list()
+  TSLM[[1]] <- tslm(TS~trend+season) %>% forecast(h=h,level=seq(10,90,10))
+  TSLM[[2]] <- tslm(TS~trend) %>% forecast(h=h,level=seq(10,90,10))
+  TSLM[[3]] <- tslm(TS~season) %>% forecast(h=h,level=seq(10,90,10))
+  return(TSLM)
+}
+```
+
+```{r}
+#Función modelos HW
+FUN.HW.Plot <- function(HW,TS,AxisX){
+  N <- length(HW)
+  M <- TS %>% as.numeric() %>% length()
+  M2 <- HW[[1]]$x %>% length()+1
+  DF1 <- list()
+  DF <- data.frame()
+  DF1[[1]] <- data.frame(Tiempo = AxisX %>% factor(levels = AxisX),
+                         Prediccion = TS %>% as.numeric(),
+                         Intervalo10 = TS %>% as.numeric(),
+                         Intervalo20 = TS %>% as.numeric(),
+                         Intervalo30 = TS %>% as.numeric(),
+                         Intervalo40 = TS %>% as.numeric(),
+                         Intervalo50 = TS %>% as.numeric(),
+                         Intervalo60 = TS %>% as.numeric(),
+                         Intervalo70 = TS %>% as.numeric(),
+                         Intervalo80 = TS %>% as.numeric(),
+                         Intervalo90 = TS %>% as.numeric(),
+                         Intervalo95 = TS %>% as.numeric(),
+                         Sup10 = TS %>% as.numeric(),
+                         Sup20 = TS %>% as.numeric(),
+                         Sup30 = TS %>% as.numeric(),
+                         Sup40 = TS %>% as.numeric(),
+                         Sup50 = TS %>% as.numeric(),
+                         Sup60 = TS %>% as.numeric(),
+                         Sup70 = TS %>% as.numeric(),
+                         Sup80 = TS %>% as.numeric(),
+                         Sup90 = TS %>% as.numeric(),
+                         Sup95 = TS %>% as.numeric(),
+                         Serie = 'Real')
+  for(i in 1:N){
+    DF1[[i+1]] <- data.frame(Tiempo = AxisX[M2:M] %>% factor(levels = AxisX),
+                             Prediccion = HW[[i]]$mean %>% as.numeric(),
+                             Intervalo10 = HW[[i]]$lower[,1] %>% as.numeric(),
+                             Intervalo20 = HW[[i]]$lower[,2] %>% as.numeric(),
+                             Intervalo30 = HW[[i]]$lower[,3] %>% as.numeric(),
+                             Intervalo40 = HW[[i]]$lower[,4] %>% as.numeric(),
+                             Intervalo50 = HW[[i]]$lower[,5] %>% as.numeric(),
+                             Intervalo60 = HW[[i]]$lower[,6] %>% as.numeric(),
+                             Intervalo70 = HW[[i]]$lower[,7] %>% as.numeric(),
+                             Intervalo80 = HW[[i]]$lower[,8] %>% as.numeric(),
+                             Intervalo90 = HW[[i]]$lower[,9] %>% as.numeric(),
+                             Intervalo95 = HW[[i]]$lower[,10] %>% as.numeric(),
+                             Sup10 = HW[[i]]$upper[,1] %>% as.numeric(),
+                             Sup20 = HW[[i]]$upper[,2] %>% as.numeric(),
+                             Sup30 = HW[[i]]$upper[,3] %>% as.numeric(),
+                             Sup40 = HW[[i]]$upper[,4] %>% as.numeric(),
+                             Sup50 = HW[[i]]$upper[,5] %>% as.numeric(),
+                             Sup60 = HW[[i]]$upper[,6] %>% as.numeric(),
+                             Sup70 = HW[[i]]$upper[,7] %>% as.numeric(),
+                             Sup80 = HW[[i]]$upper[,8] %>% as.numeric(),
+                             Sup90 = HW[[i]]$upper[,9] %>% as.numeric(),
+                             Sup95 = HW[[i]]$upper[,10] %>% as.numeric(),
+                             Serie = paste('M',i," \u03B1 = ",round(HW[[i]]$model$alpha,2),
+                                       " \u03B2 = ",round(HW[[i]]$model$beta,2),
+                                       " \u03B3 = ",round(HW[[i]]$model$gamma,2),sep=""))
+  }
+  for(i in 1:(N+1)){
+    DF <- rbind(DF,DF1[[i]])
+  }
+  DF1 <- gather(DF[,seq(1,12)],IntervaloConfianza,Inferior,Intervalo10:Intervalo95)
+  DF2 <- gather(DF[,seq(13,23)],IntervaloConfianza,Superior,Sup10:Sup95)
+  DF <- cbind(DF1,DF2[,c(1,3)])
+  plot <- ggplot(DF,aes(x=Tiempo,y=Prediccion,color=Serie,fill=Serie,group=1,frame=IntervaloConfianza))+
+            geom_line(size=0.5)+
+            geom_ribbon(aes(ymin=Inferior,ymax=Superior),alpha=0.3)+
+            ggtitle('Predicciones ')+
+            theme(axis.text.x = element_text(color='black',size=8,angle=90),
+                  axis.text.y = element_text(color='black',size=10,angle=0),
+                  legend.position="bottom")+
+            scale_y_continuous(name ="Energía [kWh]")+
+            scale_x_discrete(name ="Tiempo")+
+            guides(color=guide_legend(title=""),linetype=guide_legend(title=""))
+  plot <- ggplotly(plot)
+  real <- c(seq(N*10+1,(N+1)*10),seq(10*(2*N+1)+1,(N+1)*20))
+  for(i in real){
+    plot$x$data[[i]]$line$color <- 'black'
+    plot$x$data[[i]]$showlegend <- F
+  }
+  return(plot)
+}
+```
+
+```{r}
+#Función modelos TSLM
+FUN.TSLM.Plot <- function(TSLM,TS,AxisX){
+  N <- length(TSLM)
+  M <- TS %>% as.numeric() %>% length()
+  M2 <- TSLM[[1]]$x %>% length()+1
+  DF1 <- list()
+  DF <- data.frame()
+  Modelo <- c('Estacionalidad + Tendencia','Tendencia','Estacionalidad')
+  DF1[[1]] <- data.frame(Tiempo = AxisX %>% factor(levels = AxisX),
+                         Prediccion = TS %>% as.numeric(),
+                         Intervalo10 = TS %>% as.numeric(),
+                         Intervalo20 = TS %>% as.numeric(),
+                         Intervalo30 = TS %>% as.numeric(),
+                         Intervalo40 = TS %>% as.numeric(),
+                         Intervalo50 = TS %>% as.numeric(),
+                         Intervalo60 = TS %>% as.numeric(),
+                         Intervalo70 = TS %>% as.numeric(),
+                         Intervalo80 = TS %>% as.numeric(),
+                         Intervalo90 = TS %>% as.numeric(),
+                         Sup10 = TS %>% as.numeric(),
+                         Sup20 = TS %>% as.numeric(),
+                         Sup30 = TS %>% as.numeric(),
+                         Sup40 = TS %>% as.numeric(),
+                         Sup50 = TS %>% as.numeric(),
+                         Sup60 = TS %>% as.numeric(),
+                         Sup70 = TS %>% as.numeric(),
+                         Sup80 = TS %>% as.numeric(),
+                         Sup90 = TS %>% as.numeric(),
+                         Serie = 'Real')
+  for(i in 1:N){
+    DF1[[i+1]] <- data.frame(Tiempo = AxisX[M2:M] %>% factor(levels = AxisX),
+                             Prediccion = TSLM[[i]]$mean %>% as.numeric(),
+                             Intervalo10 = TSLM[[i]]$lower[,1] %>% as.numeric(),
+                             Intervalo20 = TSLM[[i]]$lower[,2] %>% as.numeric(),
+                             Intervalo30 = TSLM[[i]]$lower[,3] %>% as.numeric(),
+                             Intervalo40 = TSLM[[i]]$lower[,4] %>% as.numeric(),
+                             Intervalo50 = TSLM[[i]]$lower[,5] %>% as.numeric(),
+                             Intervalo60 = TSLM[[i]]$lower[,6] %>% as.numeric(),
+                             Intervalo70 = TSLM[[i]]$lower[,7] %>% as.numeric(),
+                             Intervalo80 = TSLM[[i]]$lower[,8] %>% as.numeric(),
+                             Intervalo90 = TSLM[[i]]$lower[,9] %>% as.numeric(),
+                             Sup10 = TSLM[[i]]$upper[,1] %>% as.numeric(),
+                             Sup20 = TSLM[[i]]$upper[,2] %>% as.numeric(),
+                             Sup30 = TSLM[[i]]$upper[,3] %>% as.numeric(),
+                             Sup40 = TSLM[[i]]$upper[,4] %>% as.numeric(),
+                             Sup50 = TSLM[[i]]$upper[,5] %>% as.numeric(),
+                             Sup60 = TSLM[[i]]$upper[,6] %>% as.numeric(),
+                             Sup70 = TSLM[[i]]$upper[,7] %>% as.numeric(),
+                             Sup80 = TSLM[[i]]$upper[,8] %>% as.numeric(),
+                             Sup90 = TSLM[[i]]$upper[,9] %>% as.numeric(),
+                             Serie = Modelo[i])
+  }
+  for(i in 1:(N+1)){
+    DF <- rbind(DF,DF1[[i]])
+  }
+  DF1 <- gather(DF[,seq(1,11)],IntervaloConfianza,Inferior,Intervalo10:Intervalo90)
+  DF2 <- gather(DF[,seq(12,21)],IntervaloConfianza,Superior,Sup10:Sup90)
+  DF <- cbind(DF1,DF2[,c(1,3)])
+  plot <- ggplot(DF,aes(x=Tiempo,y=Prediccion,color=Serie,fill=Serie,group=1,frame=IntervaloConfianza))+
+            geom_line(size=0.5)+
+            geom_ribbon(aes(ymin=Inferior,ymax=Superior),alpha=0.3)+
+            ggtitle('Predicciones ')+
+            theme(axis.text.x = element_text(color='black',size=8,angle=90),
+                  axis.text.y = element_text(color='black',size=10,angle=0),
+                  legend.position="bottom")+
+            scale_y_continuous(name ="Energía [kWh]")+
+            scale_x_discrete(name ="Tiempo")+
+            guides(color=guide_legend(title=""),linetype=guide_legend(title=""))
+  plot <- ggplotly(plot)
+  real <- c(seq(19,27),seq(55,63))
+  for(i in real){
+    plot$x$data[[i]]$line$color <- 'black'
+    plot$x$data[[i]]$showlegend <- F
+  }
+  return(plot)
+}
+```
+
+```{r}
+#Función error
+FUN.Error <- function(HW,TS){
+  N<-length(HW)
+  DF<-list()
+  Modelo <- 1:N
+  RMSE <- 1:N
+  MAE <- 1:N
+  MAPE <- 1:N
+  MASE <- 1:N
+  for(i in 1:N){
+    error <- accuracy(HW[[i]],TS)[2,] %>% as.data.frame()
+    Modelo[i] <- paste(i," \u03B1 = ",round(HW[[i]]$model$alpha,2),
+                       " \u03B2 = ",round(HW[[i]]$model$beta,2),
+                       " \u03B3 = ",round(HW[[i]]$model$gamma,2),sep="")
+    RMSE[i] <- error['RMSE',]
+    MAE[i] <- error['MAE',]
+    MAPE[i] <- error['MAPE',]
+    MASE[i] <- error['MASE',]
+  }
+  DF <- data.frame(Modelo = Modelo,
+                   RMSE = RMSE,
+                   MAE = MAE,
+                   MAPE = MAPE,
+                   MASE = MASE)
+  DF01 <- DF[,2:5] %>% preProcess(method=c("range")) %>% predict(DF[,2:5])
+  colnames(DF01) <- c('RMSE01','MAE01','MAPE01','MASE01')
+  DF[,2:5] <- round(DF[,2:5],2)
+  DF01 <- round(DF01,4)
+  DF <- gather(DF,Metrica,Error,RMSE:MASE)
+  DF01 <- gather(DF01,Metrica01,Error01,RMSE01:MASE01)
+  DF<- cbind(DF,DF01[,'Error01'])
+  colnames(DF)[4]<-'Error01'
+  plot <- ggplot(DF,aes(x=Metrica,y=Modelo,fill=Error01))+geom_bin2d()+
+    geom_text(aes(label = Error))+
+    scale_fill_gradient2(midpoint=0.5, low="white", mid="orange",high="red",
+                         space ="Lab",breaks=c(0,1),labels = c('Mejor','Peor'),
+                         name = "Calidad del Modelo")+
+    annotate("label",x= 2.5, y = 0.7, label = paste("Consumo Medio en el Intervalo Considerado: ",round(mean(TS),2)))+ 
+    guides(fill = guide_colorbar(title.position = "top"))+
+    theme(axis.text.x = element_text(color='black',size=10,angle=0),
+          legend.text=element_text(size=11),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_x_discrete(name ="Métrica",guide=guide_axis(n.dodge=2))+
+    scale_y_discrete(name ="Error del Modelo.")+
+    ggtitle('Resumen Métricas')
+  return(plot)
+}
+  
+```
+
+```{r}
+#Creamos los modelos
+M.LP.EA.HW <- FUN.HW.Modelo(window(TS.LP[,'EA'],end=c(2009,12)),10)
+PLOT.LP.EA.HW <- FUN.HW.Plot(M.LP.EA.HW,TS.LP[,'EA'],CHA.Yearly)
+PLOT.LP.EA.HW$x$layout$title$text <- "Predicción Largo Plazo Energía Activa mediante HW."
+```
+
+```{r LPEAHW,fig.cap="Predicciones a largo plazo de la energía activa mediante Holt-Winters.",fig.width=10,fig.height=4}
+PLOT.LP.EA.HW
+```
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+```{r}
+#Creamos los modelos
+M.LP.EA.TSLM <- FUN.TSLM.Modelo(window(TS.LP[,'EA'],end=c(2009,12)),10)
+PLOT.LP.EA.TSLM <- FUN.TSLM.Plot(M.LP.EA.TSLM,TS.LP[,'EA'],CHA.Yearly)
+PLOT.LP.EA.TSLM$x$layout$title$text <- "Predicción Largo Plazo Energía Activa mediante TSLM."
+```
+
+```{r LPEATSLM,fig.cap="Predicciones a largo plazo de la energía activa mediante TSLM.",fig.width=10,fig.height=4}
+PLOT.LP.EA.TSLM
+```
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+```{r LPEAHWE,fig.cap="Métricas del error. Largo plazo. Energía Activa.",fig.width=8,fig.height=6}
+PLOT.LP.EA.HW.E <- FUN.Error(M.LP.EA.HW,window(TS.LP[,'EA'],start=2010))
+PLOT.LP.EA.HW.E
+```
+
+El modelo con estacionalidad predice con buena precisión los datos.
+
+### ENERGÍA REACTIVA
+
+#### DESCOMPOSICIÓN
+
+El valor de la energía reactiva no puede ser controlado por el usuario y, por ello, será de gran interés predecir la tendencia de esta. Esta nos informará sobre la evolución de la eficiencia de nuestra instalación.
+
+Veamos la descomposición de la señal para verificar este punto:
+
+```{r ER_AnualDesc, fig.cap="Descomposición a largo plazo de la energía reactiva",fig.width=8,fig.height=6}
+#Gráfico Descomposición ER
+PLOT.LP.ER.Dec <- stl(TS.LP[,'ER'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Energía Reactiva. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía Mensual [kWh]")+
+    scale_x_continuous(name ="Mes",limit=c(2007,2011),breaks=seq(2007,2011-3/12,1/12),labels=CHA.Yearly,minor_breaks = NULL)
+PLOT.LP.ER.Dec
+```
+
+Los resultados no muestran una clara tendencia ascenedente. 
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+```{r}
+#Creamos los modelos
+M.LP.ER.HW <- FUN.HW.Modelo(window(TS.LP[,'ER'],end=c(2009,12)),10)
+PLOT.LP.ER.HW <- FUN.HW.Plot(M.LP.ER.HW,TS.LP[,'ER'],CHA.Yearly)
+PLOT.LP.ER.HW$x$layout$title$text <- "Predicción Largo Plazo Energía Reactiva mediante HW."
+```
+
+```{r LPERHW,fig.cap="Predicciones a largo plazo de la energía reactiva mediante Holt-Winters.",fig.width=8,fig.height=6}
+PLOT.LP.ER.HW
+```
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+```{r}
+#Creamos los modelos
+M.LP.ER.TSLM <- FUN.TSLM.Modelo(window(TS.LP[,'ER'],end=c(2009,12)),10)
+PLOT.LP.ER.TSLM <- FUN.TSLM.Plot(M.LP.ER.TSLM,TS.LP[,'ER'],CHA.Yearly)
+PLOT.LP.ER.TSLM$x$layout$title$text <- "Predicción Largo Plazo Energía Reactiva mediante TSLM."
+```
+
+```{r LPERTSLM,fig.cap="Predicciones a largo plazo de la energía reactiva mediante TSLM.",fig.width=8,fig.height=6}
+PLOT.LP.ER.TSLM
+```
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+```{r LPERHWE,fig.cap="Métricas del error. Largo plazo. Energía Reactiva.",fig.width=8,fig.height=6}
+PLOT.LP.ER.HW.E <- FUN.Error(M.LP.ER.HW,window(TS.LP[,'ER'],start=2010))
+PLOT.LP.ER.HW.E
+```
+
+El valor constante es el modelo que mejor ajusta.
+
+### SUBCONTADOR 1: COCINA
+
+#### DESCOMPOSICIÓN
+
+Veamos la descomposición del registro:
+
+```{r SC1AnualDesc, fig.cap="Descomposición a largo plazo del subcontador 1",fig.width=8,fig.height=6}
+#Gráfico Descomposición SC1
+PLOT.LP.SC1.Dec <- stl(TS.LP[,'SC1'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Energía Subcontador 1. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía Mensual [kWh]")+
+    scale_x_continuous(name ="Mes",limit=c(2007,2011),breaks=seq(2007,2011-3/12,1/12),labels=CHA.Yearly,minor_breaks = NULL)
+PLOT.LP.SC1.Dec
+```
+
+Los resultados muestran una cierta tendencia a la baja. 
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+```{r}
+#Creamos los modelos
+M.LP.SC1.HW <- FUN.HW.Modelo(window(TS.LP[,'SC1'],end=c(2009,12)),10)
+PLOT.LP.SC1.HW <- FUN.HW.Plot(M.LP.SC1.HW,TS.LP[,'SC1'],CHA.Yearly)
+PLOT.LP.SC1.HW$x$layout$title$text <- "Predicción Largo Plazo Subcontador 1 mediante HW."
+
+```
+
+```{r LPSC1HW,fig.cap="Predicciones a largo plazo del subcontador 1 mediante Holt-Winters.",fig.width=8,fig.height=6}
+PLOT.LP.SC1.HW
+```
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+```{r}
+#Creamos los modelos
+M.LP.SC1.TSLM <- FUN.TSLM.Modelo(window(TS.LP[,'SC1'],end=c(2009,12)),10)
+PLOT.LP.SC1.TSLM <- FUN.TSLM.Plot(M.LP.SC1.TSLM,TS.LP[,'SC1'],CHA.Yearly)
+PLOT.LP.SC1.TSLM$x$layout$title$text <- "Predicción Largo Plazo Subcontador 1 mediante TSLM."
+```
+
+```{r LPSC1TSLM,fig.cap="Predicciones a largo plazo del subcontador 1 mediante TSLM.",fig.width=8,fig.height=6}
+PLOT.LP.SC1.TSLM
+```
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+```{r LPSC1HWE,fig.cap="Métricas del error. Largo plazo. Cocina.",fig.width=8,fig.height=6}
+PLOT.LP.SC1.HW.E <- FUN.Error(M.LP.SC1.HW,window(TS.LP[,'SC1'],start=2010))
+PLOT.LP.SC1.HW.E
+```
+
+El modelo con estacionalidad captura bien el registro del subcontador 1.
+
+### SUBCONTADOR 2: LAVANDERÍA
+
+#### DESCOMPOSICIÓN
+
+Veamos la descomposición del registro:
+
+```{r SC2AnualDesc, fig.cap="Descomposición a largo plazo del subcontador 2",fig.width=8,fig.height=6}
+#Gráfico Descomposición SC2
+PLOT.LP.SC2.Dec <- stl(TS.LP[,'SC2'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Energía Subcontador 2. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía Mensual [kWh]")+
+    scale_x_continuous(name ="Mes",limit=c(2007,2011),breaks=seq(2007,2011-3/12,1/12),labels=CHA.Yearly,minor_breaks = NULL)
+PLOT.LP.SC2.Dec
+```
+
+Los resultados muestran una tendencia a disminuir el consumo de la lavandería tal y como se observaba en la figura \@ref(fig:MediaSC). 
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+```{r}
+#Creamos los modelos
+M.LP.SC2.HW <- FUN.HW.Modelo(window(TS.LP[,'SC2'],end=c(2009,12)),10)
+PLOT.LP.SC2.HW <- FUN.HW.Plot(M.LP.SC2.HW,TS.LP[,'SC2'],CHA.Yearly)
+PLOT.LP.SC2.HW$x$layout$title$text <- "Predicción Largo Plazo Subcontador 2 mediante HW."
+```
+
+```{r LPSC2HW,fig.cap="Predicciones a largo plazo del subcontador 2 mediante Holt-Winters.",fig.width=8,fig.height=6}
+PLOT.LP.SC2.HW
+```
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+```{r}
+#Creamos los modelos
+M.LP.SC2.TSLM <- FUN.TSLM.Modelo(window(TS.LP[,'SC2'],end=c(2009,12)),10)
+PLOT.LP.SC2.TSLM <- FUN.TSLM.Plot(M.LP.SC2.TSLM,TS.LP[,'SC2'],CHA.Yearly)
+PLOT.LP.SC2.TSLM$x$layout$title$text <- "Predicción Largo Plazo Subcontador 2 mediante TSLM."
+```
+
+```{r LPSC2TSLM,fig.cap="Predicciones a largo plazo del subcontador 2 mediante TSLM.",fig.width=8,fig.height=6}
+PLOT.LP.SC2.TSLM
+```
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+```{r LPSC2HWE,fig.cap="Métricas del error. Largo plazo. Lavandería.",fig.width=8,fig.height=4}
+PLOT.LP.SC2.HW.E <- FUN.Error(M.LP.SC2.HW,window(TS.LP[,'SC2'],start=2010))
+PLOT.LP.SC2.HW.E
+```
+
+Incluso cuando dejamos los parámetros libres, la óptimización del algoritmo nos devuelve un valor nulo de *gamma*, asociado a la baja participación de la componente estacional.
+
+### SUBCONTADOR 3: CALENTADOR Y AC
+
+
+#### DESCOMPOSICIÓN
+
+Veamos la descomposición del registro del subcontador 3:
+
+```{r SC3AnualDesc, fig.cap="Descomposición a largo plazo del subcontador 3",fig.width=8,fig.height=6}
+#Gráfico Descomposición SC3
+PLOT.LP.SC3.Dec <- stl(TS.LP[,'SC3'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Energía Subcontador 3. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía Mensual [kWh]")+
+    scale_x_continuous(name ="Mes",limit=c(2007,2011),breaks=seq(2007,2011-3/12,1/12),labels=CHA.Yearly,minor_breaks = NULL)
+PLOT.LP.SC3.Dec
+```
+
+Los resultados muestran una tendencia a aumentar el consumo clara tal y como se observaba en la figura \@ref(fig:MediaSC). 
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+```{r}
+#Creamos los modelos
+M.LP.SC3.HW <- FUN.HW.Modelo(window(TS.LP[,'SC3'],end=c(2009,12)),10)
+PLOT.LP.SC3.HW <- FUN.HW.Plot(M.LP.SC3.HW,TS.LP[,'SC3'],CHA.Yearly)
+PLOT.LP.SC3.HW$x$layout$title$text <- "Predicción Largo Plazo Subcontador 3 mediante HW."
+```
+
+```{r LPSC3HW,fig.cap="Predicciones a largo plazo del subcontador 3 mediante Holt-Winters.",fig.width=8,fig.height=6}
+PLOT.LP.SC3.HW
+```
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+```{r}
+#Creamos los modelos
+M.LP.SC3.TSLM <- FUN.TSLM.Modelo(window(TS.LP[,'SC3'],end=c(2009,12)),10)
+PLOT.LP.SC3.TSLM <- FUN.TSLM.Plot(M.LP.SC3.TSLM,TS.LP[,'SC3'],CHA.Yearly)
+PLOT.LP.SC3.TSLM$x$layout$title$text <- "Predicción Largo Plazo Subcontador 3 mediante TSLM."
+```
+
+```{r LPSC3TSLM,fig.cap="Predicciones a largo plazo del subcontador 3 mediante TSLM.",fig.width=8,fig.height=6}
+PLOT.LP.SC3.TSLM
+```
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+```{r LPSC3HWE,fig.cap="Métricas del error. Largo plazo. Calentador y AC.",fig.width=8,fig.height=4}
+PLOT.LP.SC3.HW.E <- FUN.Error(M.LP.SC3.HW,window(TS.LP[,'SC3'],start=2010))
+PLOT.LP.SC3.HW.E
+```
+
+## MODELADO A MEDIO PLAZO
+
+En esta sección se construirá el modelo capaz de predecir el consumo a medio plazo.
+
+### PREPARACIÓN DE LOS DATOS
+
+El objetivo que nos proponemos aquí es predecir las tendencias semanales. Por ello tomaremos las últimas 5 semanas y media. Utilizaremos 1 semana como test y el resto como datos de entranamiento.
+
+Por los motivos mencionados anteriomente, se tomará el data set con los **datos agrupados por días**. Además, recortamos entre las fechas 18/10/2010 y 25/11/2010 para **evitar datos de días incompletos**.
+
+```{r}
+#Creamos objeto time-series Train
+TS.MP <- filter(DF.Data.Daily,Fecha>="2010-10-18" & Fecha <"2010-11-26")[,2:6] %>% 
+  ts(start=1,frequency = 7)
+CHA.Semana <- c('18/10 L','19/10 M','20/10 X','21/10 J','22/10 V','23/10 S','24/10 D',
+                '25/10 L','26/10 M','27/10 X','28/10 J','29/10 V','30/10 S','31/10 D',
+                '01/11 L','02/11 M','03/11 X','04/11 J','05/11 V','06/11 S','07/11 D',
+                '08/11 L','09/11 M','10/11 X','11/11 J','12/11 V','13/11 S','14/11 D',
+                '15/11 L','16/11 M','17/11 X','18/11 J','19/11 V','20/11 S','21/11 D',
+                '22/11 L','23/11 M','24/11 X','25/11 J')
+```
+
+### ENERGÍA ACTIVA
+
+#### DESCOMPOSICIÓN
+
+Veamos la descomposición de la señal registrada:
+
+```{r EASemanalDesc, fig.cap="Descomposición a medio plazo de la energía activa",fig.width=8,fig.height=6}
+#Gráfico Descomposición EA
+PLOT.MP.EA.Dec <- stl(TS.MP[,'EA'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Energía Activa. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía Mensual [kWh]")+
+    scale_x_continuous(name ="Semana",limit=c(1,7),breaks=seq(1,6+3/7,1/7),labels=CHA.Semana,minor_breaks = NULL)
+PLOT.MP.EA.Dec
+```
+
+La componente dominante es el ruido. Estos nos anticipa una gran dificultad para predecir los futuros resultados.
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+```{r}
+#Creamos los modelos
+M.MP.EA.HW <- FUN.HW.Modelo(window(TS.MP[,'EA'],end=c(5,4)),7)
+PLOT.MP.EA.HW <- FUN.HW.Plot(M.MP.EA.HW,TS.MP[,'EA'],CHA.Semana)
+PLOT.MP.EA.HW$x$layout$title$text <- "Predicción Medio Plazo Energía Activa mediante HW."
+```
+
+```{r MPEAHW,fig.cap="Predicciones a medio plazo de la energía activa mediante Holt-Winters.",fig.width=8,fig.height=6}
+PLOT.MP.EA.HW
+```
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+```{r}
+#Creamos los modelos
+M.MP.EA.TSLM <- FUN.TSLM.Modelo(window(TS.MP[,'EA'],end=c(5,4)),7)
+PLOT.MP.EA.TSLM <- FUN.TSLM.Plot(M.MP.EA.TSLM,TS.MP[,'EA'],CHA.Semana)
+PLOT.MP.EA.TSLM$x$layout$title$text <- "Predicción Medio Plazo Energía Activa mediante TSLM."
+```
+
+```{r MPEATSLM,fig.cap="Predicciones a medio plazo de la energía activa mediante TSLM.",fig.width=8,fig.height=6}
+PLOT.MP.EA.TSLM
+```
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+```{r MPEAHWE,fig.cap="Métricas del error. Medio plazo. Energía Activa.",fig.width=8,fig.height=4}
+PLOT.MP.EA.HW.E <- FUN.Error(M.MP.EA.HW,window(TS.MP[,'EA'],start=c(5,5)))
+PLOT.MP.EA.HW.E
+```
+
+El modelo no es capaz de capturar la señal como preveíamos. La mejor aproximación es considerar una tendencia únicamente.
+
+### SUBCONTADOR 1: COCINA
+
+#### DESCOMPOSICIÓN
+
+Se decompone la señal:
+
+```{r SC1SemanalDesc, fig.cap="Descomposición a medio plazo del subcontador 1",fig.width=8,fig.height=6}
+#Gráfico Descomposición SC1
+PLOT.MP.SC1.Dec <- stl(TS.MP[,'SC1'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Subcontador 1. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía Diaria [kWh]")+
+    scale_x_continuous(name ="Semana",limit=c(1,7),breaks=seq(1,6+3/7,1/7),labels=CHA.Semana,minor_breaks = NULL)
+PLOT.MP.SC1.Dec
+```
+
+Domina el ruido seguido de la estacionalidad. Tendencia muy débil.
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+```{r}
+#Creamos los modelos
+M.MP.SC1.HW <- FUN.HW.Modelo(window(TS.MP[,'SC1'],end=c(5,4)),7)
+PLOT.MP.SC1.HW <- FUN.HW.Plot(M.MP.SC1.HW,TS.MP[,'SC1'],CHA.Semana)
+PLOT.MP.SC1.HW$x$layout$title$text <- "Predicción Medio Plazo Subcontador1 mediante HW."
+```
+
+```{r MPSC1HW,fig.cap="Predicciones a medio plazo del subcontador 1 mediante Holt-Winters.",fig.width=8,fig.height=6}
+PLOT.MP.SC1.HW
+```
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+```{r}
+#Creamos los modelos
+M.MP.SC1.TSLM <- FUN.TSLM.Modelo(window(TS.MP[,'SC1'],end=c(5,4)),7)
+PLOT.MP.SC1.TSLM <- FUN.TSLM.Plot(M.MP.SC1.TSLM,TS.MP[,'SC1'],CHA.Semana)
+PLOT.MP.SC1.TSLM$x$layout$title$text <- "Predicción Medio Plazo Subcontador1 mediante TSLM."
+```
+
+```{r MPSC1TSLM,fig.cap="Predicciones a medio plazo del subcontador 1 mediante TSLM.",fig.width=8,fig.height=6}
+PLOT.MP.SC1.TSLM
+```
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+```{r MPSC1HWE,fig.cap="Métricas del error. Medio plazo. Cocina.",fig.width=8,fig.height=4}
+PLOT.MP.SC1.HW.E <- FUN.Error(M.MP.SC1.HW,window(TS.MP[,'SC1'],start=c(5,5)))
+PLOT.MP.SC1.HW.E
+```
+
+El modelo es incapaz de predecir el futuro consumo con precisión. Es preferible capturar únicamente la tendencia general.
+
+### SUBCONTADOR 2: LAVANDERÍA
+
+#### DESCOMPOSICIÓN
+
+Descomposición del registro del subcontador 2 (lavandería):
+
+```{r SC2SemanalDesc, fig.cap="Descomposición a medio plazo del subcontador 2",fig.width=8,fig.height=6}
+#Gráfico Descomposición SC1
+PLOT.MP.SC2.Dec <- stl(TS.MP[,'SC2'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Subcontador 2. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía Diaria [kWh]")+
+    scale_x_continuous(name ="Semana",limit=c(1,7),breaks=seq(1,6+3/7,1/7),labels=CHA.Semana,minor_breaks = NULL)
+PLOT.MP.SC2.Dec
+```
+
+Domina la componente ruido. Resultará difícil realizar predicciones con precisión.
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+```{r}
+#Creamos los modelos
+M.MP.SC2.HW <- FUN.HW.Modelo(window(TS.MP[,'SC2'],end=c(5,4)),7)
+PLOT.MP.SC2.HW <- FUN.HW.Plot(M.MP.SC2.HW,TS.MP[,'SC2'],CHA.Semana)
+PLOT.MP.SC2.HW$x$layout$title$text <- "Predicción Medio Plazo Subcontador 2 mediante HW."
+```
+
+```{r MPSC2HW,fig.cap="Predicciones a medio plazo del subcontador 2 mediante Holt-Winters.",fig.width=8,fig.height=6}
+PLOT.MP.SC2.HW
+```
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+```{r}
+#Creamos los modelos
+M.MP.SC2.TSLM <- FUN.TSLM.Modelo(window(TS.MP[,'SC2'],end=c(5,4)),7)
+PLOT.MP.SC2.TSLM <- FUN.TSLM.Plot(M.MP.SC2.TSLM,TS.MP[,'SC2'],CHA.Semana)
+PLOT.MP.SC2.TSLM$x$layout$title$text <- "Predicción Medio Plazo Subcontador 2 mediante TSLM."
+```
+
+```{r MPSC2TSLM,fig.cap="Predicciones a medio plazo del subcontador 2 mediante TSLM.",fig.width=8,fig.height=6}
+PLOT.MP.SC2.TSLM
+```
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+```{r MPSC2HWE,fig.cap="Métricas del error. Medio plazo. Lavandería.",fig.width=8,fig.height=4}
+PLOT.MP.SC2.HW.E <- FUN.Error(M.MP.SC2.HW,window(TS.MP[,'SC2'],start=c(5,5)))
+PLOT.MP.SC2.HW.E
+```
+
+Un modelo constante proporciona los mejores resultados. Este hecho destaca la imposibilidad de predecir los resultados.
+
+### SUBCONTADOR 3: CALENTADOR Y AC
+
+#### DESCOMPOSICIÓN
+
+Descomposición del subcontador 3 (calentador y AC):
+
+```{r SC3SemanalDesc, fig.cap="Descomposición a medio plazo del subcontador 3",fig.width=8,fig.height=6}
+#Gráfico Descomposición SC3
+PLOT.MP.SC3.Dec <- stl(TS.MP[,'SC3'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Subcontador 3. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía Diaria [kWh]")+
+    scale_x_continuous(name ="Semana",limit=c(1,7),breaks=seq(1,6+3/7,1/7),labels=CHA.Semana,minor_breaks = NULL)
+PLOT.MP.SC3.Dec
+```
+
+Domina la componente ruido.
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+```{r}
+#Creamos los modelos
+M.MP.SC3.HW <- FUN.HW.Modelo(window(TS.MP[,'SC3'],end=c(5,4)),7)
+PLOT.MP.SC3.HW <- FUN.HW.Plot(M.MP.SC3.HW,TS.MP[,'SC3'],CHA.Semana)
+PLOT.MP.SC3.HW$x$layout$title$text <- "Predicción Medio Plazo Subcontador 3 mediante HW."
+```
+
+```{r MPSC3HW,fig.cap="Predicciones a medio plazo del subcontador 3 mediante Holt-Winters.",fig.width=8,fig.height=6}
+PLOT.MP.SC3.HW
+```
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+```{r}
+#Creamos los modelos
+M.MP.SC3.TSLM <- FUN.TSLM.Modelo(window(TS.MP[,'SC3'],end=c(5,4)),7)
+PLOT.MP.SC3.TSLM <- FUN.TSLM.Plot(M.MP.SC3.TSLM,TS.MP[,'SC3'],CHA.Semana)
+PLOT.MP.SC3.TSLM$x$layout$title$text <- "Predicción Medio Plazo Subcontador 3 mediante TSLM."
+```
+
+```{r MPSC3TSLM,fig.cap="Predicciones a medio plazo del subcontador 3 mediante TSLM.",fig.width=8,fig.height=6}
+PLOT.MP.SC3.TSLM
+```
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+```{r MPSC3HWE,fig.cap="Métricas del error. Medio plazo. Calentador y AC",fig.width=8,fig.height=4}
+PLOT.MP.SC3.HW.E <- FUN.Error(M.MP.SC3.HW,window(TS.MP[,'SC3'],start=c(5,5)))
+PLOT.MP.SC3.HW.E
+```
+
+El modelo que contempla la estacionalidad es capaz de predecir algunos picos mejor que otros. Aún sin ser totalmente fiable, proporciona mejores métricas del error.
+
+## MODELADO A CORTO PLAZO
+
+En esta sección se construirá el modelo capaz de predecir el consumo a corto plazo.
+
+### PREPARACIÓN DE LOS DATOS
+
+El objetivo que nos proponemos aquí es predecir el consumo por horas para hasta 2 días. Debido a la diferencia de patrón que tenemos entre los días entre semana y los fines de semana, realizaremos el análisis de cada uno por separando.
+
+Se tomará el data set con los **datos agrupados por horas**. Además, recortamos entre las 00:00 horas del 18/10/2010 y las 22:00 horas 26/11/2010  para **evitar datos de días incompletos**.
+
+* **Entre Semana**
+
+```{r}
+#Creamos objeto time-series Train
+TS.CP.ES <- filter(DF.Data.Hour,Fecha>="2010-11-22" & (Fecha<"2010-11-26" | hour(Fecha)<22))[,2:6] %>% 
+  ts(start=0,frequency = 24)
+CHA.Dias <- c('L','M','X','J','V','S','D')
+CHA.Dia.ES <- c(outer(paste(seq(0,23),'h ',sep=''),CHA.Dias, FUN=paste0))[1:length(TS.CP.ES[,1])]
+```
+
+* **Fin de Semana**
+
+```{r}
+#Creamos objeto time-series Train
+TS.CP.FS <- filter(DF.Data.Hour,Fecha>"2010-11-12" & Fecha<"2010-11-22" & (weekdays(Fecha)=='Saturday' | weekdays(Fecha)=='Sunday'))[,2:6] %>% 
+  ts(start=1,frequency = 24)
+CHA.Dia.FS <- c(outer(paste(seq(0,23),'h ',sep=''),c('S 13/11','D 14/11','S 20/11','D 21/11'), FUN=paste0))
+```
+
+
+### ENERGÍA ACTIVA
+
+#### DESCOMPOSICIÓN
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+
+```{r EAESDesc, fig.cap="Descomposición a corto plazo de la energía activa. Entre semana.",fig.width=8,fig.height=6}
+#Gráfico Descomposición EA
+PLOT.CP.EA.ES.Dec <- stl(TS.CP.ES[,'EA'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Energía Activa. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=8,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Horas [kWh]")+
+    scale_x_continuous(name ="Hora",limit=c(1,6),breaks=seq(1,5+21/24,4/24),labels=CHA.Dia.ES[seq(1,118,4)],minor_breaks = NULL)
+PLOT.CP.EA.ES.Dec
+```
+
+Se muestra un claro dominio de la estacionalidad y el ruido.
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r EAFSDesc, fig.cap="Descomposición a corto plazo de la energía activa. Fin de semana.",fig.width=8,fig.height=6}
+#Gráfico Descomposición EA
+PLOT.CP.EA.FS.Dec <- stl(TS.CP.FS[,'EA'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Energía Activa. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Horas [kWh]")+
+    scale_x_continuous(name ="Hora",limit=c(1,5),breaks=seq(1,5-1/24,4/24),labels=CHA.Dia.FS[seq(1,96,4)],minor_breaks = NULL)
+PLOT.CP.EA.FS.Dec
+```
+
+Todas las componentes son importantes. El último domingo del análisis muestra una clara disminución del consumo.
+
+##### {.unlisted .unnumbered}
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.ES.EA.HW <- FUN.HW.Modelo(window(TS.CP.ES[,'EA'],end=c(3,24)),22)
+PLOT.CP.ES.EA.HW <- FUN.HW.Plot(M.CP.ES.EA.HW,TS.CP.ES[,'EA'],CHA.Dia.ES)
+PLOT.CP.ES.EA.HW$x$layout$title$text <- "Predicción Corto Plazo Energía Activa mediante HW. Entre Semana."
+```
+
+```{r CPESEAHW,fig.cap="Predicciones a corto plazo de la energía activa mediante Holt-Winters. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.ES.EA.HW
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.FS.EA.HW <- FUN.HW.Modelo(window(TS.CP.FS[,'EA'],end=c(3,24)),24)
+PLOT.CP.FS.EA.HW <- FUN.HW.Plot(M.CP.FS.EA.HW,TS.CP.FS[,'EA'],CHA.Dia.FS)
+PLOT.CP.FS.EA.HW$x$layout$title$text <- "Predicción Corto Plazo Energía Activa mediante HW. Fin de Semana."
+```
+
+```{r CPFSEAHW,fig.cap="Predicciones a corto plazo de la energía activa mediante Holt-Winters. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.FS.EA.HW
+```
+
+##### {.unlisted .unnumbered}
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.ES.EA.TSLM <- FUN.TSLM.Modelo(window(TS.CP.ES[,'EA'],end=c(3,24)),22)
+PLOT.CP.ES.EA.TSLM <- FUN.TSLM.Plot(M.CP.ES.EA.TSLM,TS.CP.ES[,'EA'],CHA.Dia.ES)
+PLOT.CP.ES.EA.TSLM$x$layout$title$text <- "Predicción Corto Plazo Energía Activa mediante TSLM. Entre Semana."
+```
+
+```{r CPESEATSLM,fig.cap="Predicciones a corto plazo de la energía activa mediante TSLM. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.ES.EA.TSLM
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.FS.EA.TSLM <- FUN.TSLM.Modelo(window(TS.CP.FS[,'EA'],end=c(3,24)),24)
+PLOT.CP.FS.EA.TSLM <- FUN.TSLM.Plot(M.CP.FS.EA.TSLM,TS.CP.FS[,'EA'],CHA.Dia.FS)
+PLOT.CP.FS.EA.TSLM$x$layout$title$text <- "Predicción Corto Plazo Energía Activa mediante TSLM. Fin de Semana."
+```
+
+```{r CPFSEATSLM,fig.cap="Predicciones a corto plazo de la energía activa mediante TSLM. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.FS.EA.TSLM
+```
+
+##### {.unlisted .unnumbered}
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r CPESEAHWE,fig.cap="Métricas del error. Corto plazo. Entre Semana. Energía Activa",fig.width=8,fig.height=4}
+PLOT.CP.ES.EA.HW.E <- FUN.Error(M.CP.ES.EA.HW,window(TS.CP.ES[,'EA'],start=4))
+PLOT.CP.ES.EA.HW.E
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r CPFSEAHWE,fig.cap="Métricas del error. Corto plazo. Fin de Semana. Energía Activa",fig.width=8,fig.height=4}
+PLOT.CP.FS.EA.HW.E <- FUN.Error(M.CP.FS.EA.HW,window(TS.CP.FS[,'EA'],start=4))
+PLOT.CP.FS.EA.HW.E
+```
+
+##### {.unlisted .unnumbered}
+
+### SUBCONTADOR 1: COCINA
+
+#### DESCOMPOSICIÓN
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r SC1ESDesc, fig.cap="Descomposición a corto plazo del registro del subcontador 1.",fig.width=8,fig.height=6}
+#Gráfico Descomposición EA
+PLOT.CP.SC1.ES.Dec <- stl(TS.CP.ES[,'SC1'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Subcontador 1. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=8,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Horas [kWh]")+
+    scale_x_continuous(name ="Hora",limit=c(1,6),breaks=seq(1,5+21/24,4/24),labels=CHA.Dia.ES[seq(1,118,4)],minor_breaks = NULL)
+PLOT.CP.SC1.ES.Dec
+```
+
+El dominio de la componente aleatoria augura una difícil predicción del consumo del subcontador 1.
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r SC1FSDesc, fig.cap="Descomposición a corto plazo del registro del subcontador 1. Fin de semana.",fig.width=8,fig.height=6}
+#Gráfico Descomposición EA
+PLOT.CP.SC1.FS.Dec <- stl(TS.CP.FS[,'SC1'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Subcontador 1. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Horas [kWh]")+
+    scale_x_continuous(name ="Hora",limit=c(1,5),breaks=seq(1,5-1/24,4/24),labels=CHA.Dia.FS[seq(1,96,4)],minor_breaks = NULL)
+PLOT.CP.SC1.FS.Dec
+```
+
+Todas las componentes son del mismo orden de magnitud. La señal original es algo irregular y se comporta distinto durante el último domingo donde no registra ningún pico. Esta irregularidad en el consumo dificultará la predicción del consumo.
+
+##### {.unlisted .unnumbered}
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.ES.SC1.HW <- FUN.HW.Modelo(window(TS.CP.ES[,'SC1'],end=c(3,24)),22)
+PLOT.CP.ES.SC1.HW <- FUN.HW.Plot(M.CP.ES.SC1.HW,TS.CP.ES[,'SC1'],CHA.Dia.ES)
+PLOT.CP.ES.SC1.HW$x$layout$title$text <- "Predicción Corto Plazo Subcontador 1 mediante HW. Entre Semana."
+```
+
+```{r CPESSC1HW,fig.cap="Predicciones a corto plazo del subcontador 1 mediante Holt-Winters. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.ES.SC1.HW
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.FS.SC1.HW <- FUN.HW.Modelo(window(TS.CP.FS[,'SC1'],end=c(3,24)),24)
+PLOT.CP.FS.SC1.HW <- FUN.HW.Plot(M.CP.FS.SC1.HW,TS.CP.FS[,'SC1'],CHA.Dia.FS)
+PLOT.CP.FS.SC1.HW$x$layout$title$text <- "Predicción Corto Plazo Subcontador 1 mediante HW. Fin de Semana."
+```
+
+```{r CPFSSC1HW,fig.cap="Predicciones a corto plazo del subcontador 1 mediante Holt-Winters. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.FS.SC1.HW
+```
+
+##### {.unlisted .unnumbered}
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.ES.SC1.TSLM <- FUN.TSLM.Modelo(window(TS.CP.ES[,'SC1'],end=c(3,24)),22)
+PLOT.CP.ES.SC1.TSLM <- FUN.TSLM.Plot(M.CP.ES.SC1.TSLM,TS.CP.ES[,'SC1'],CHA.Dia.ES)
+PLOT.CP.ES.SC1.TSLM$x$layout$title$text <- "Predicción Corto Plazo Subcontador 1 mediante TSLM. Entre Semana."
+```
+
+```{r CPESSC1TSLM,fig.cap="Predicciones a corto plazo del subcontador 1 mediante TSLM. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.ES.SC1.TSLM
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.FS.SC1.TSLM <- FUN.TSLM.Modelo(window(TS.CP.FS[,'SC1'],end=c(3,24)),24)
+PLOT.CP.FS.SC1.TSLM <- FUN.TSLM.Plot(M.CP.FS.SC1.TSLM,TS.CP.FS[,'SC1'],CHA.Dia.FS)
+PLOT.CP.FS.SC1.TSLM$x$layout$title$text <- "Predicción Corto Plazo Subcontador 1 mediante TSLM. Fin de Semana."
+```
+
+```{r CPFSSC1TSLM,fig.cap="Predicciones a corto plazo del subcontador 1 mediante TSLM. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.FS.SC1.TSLM
+```
+
+##### {.unlisted .unnumbered}
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r CPESSC1HWE,fig.cap="Métricas del error. Corto plazo. Entre Semana. Cocina",fig.width=8,fig.height=4}
+PLOT.CP.ES.SC1.HW.E <- FUN.Error(M.CP.ES.SC1.HW,window(TS.CP.ES[,'SC1'],start=4))
+PLOT.CP.ES.SC1.HW.E
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r CPFSSC1HWE,fig.cap="Métricas del error. Corto plazo. Fin de Semana. Cocina.",fig.width=8,fig.height=4}
+PLOT.CP.FS.SC1.HW.E <- FUN.Error(M.CP.FS.SC1.HW,window(TS.CP.FS[,'SC1'],start=4))
+PLOT.CP.FS.SC1.HW.E
+```
+
+##### {.unlisted .unnumbered}
+
+### SUBCONTADOR 2: LAVANDERÍA
+
+#### DESCOMPOSICIÓN
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+
+```{r SC2ESDesc, fig.cap="Descomposición a corto plazo del registro del subcontador 2.",fig.width=8,fig.height=6}
+#Gráfico Descomposición SC2
+PLOT.CP.SC2.ES.Dec <- stl(TS.CP.ES[,'SC2'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Subcontador 2. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=8,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Horas [kWh]")+
+    scale_x_continuous(name ="Hora",limit=c(1,6),breaks=seq(1,5+21/24,4/24),labels=CHA.Dia.ES[seq(1,118,4)],minor_breaks = NULL)
+PLOT.CP.SC2.ES.Dec
+```
+
+El consumo registrado por el subcontador 2 es altamente irregular. No parece que la predicción vaya a dar buenos resultados.
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r SC2FSDesc, fig.cap="Descomposición a corto plazo del registro del subcontador 2. Fin de semana.",fig.width=8,fig.height=6}
+#Gráfico Descomposición SC2
+PLOT.CP.SC2.FS.Dec <- stl(TS.CP.FS[,'SC2'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Subcontador 2. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Horas [kWh]")+
+    scale_x_continuous(name ="Hora",limit=c(1,5),breaks=seq(1,5-1/24,4/24),labels=CHA.Dia.FS[seq(1,96,4)],minor_breaks = NULL)
+PLOT.CP.SC2.FS.Dec
+```
+
+De igual forma que entre semana, el consumo es muy irregular. No parece factible realizar una predicción que trate de capturar exactamente los picos de consumo.
+
+##### {.unlisted .unnumbered}
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.ES.SC2.HW <- FUN.HW.Modelo(window(TS.CP.ES[,'SC2'],end=c(3,24)),22)
+PLOT.CP.ES.SC2.HW <- FUN.HW.Plot(M.CP.ES.SC2.HW,TS.CP.ES[,'SC2'],CHA.Dia.ES)
+PLOT.CP.ES.SC2.HW$x$layout$title$text <- "Predicción Corto Plazo Subcontador 2 mediante HW. Entre Semana."
+```
+
+```{r CPESSC2HW,fig.cap="Predicciones a corto plazo del subcontador 2 mediante Holt-Winters. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.ES.SC2.HW
+```
+
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.FS.SC2.HW <- FUN.HW.Modelo(window(TS.CP.FS[,'SC2'],end=c(3,24)),24)
+PLOT.CP.FS.SC2.HW <- FUN.HW.Plot(M.CP.FS.SC2.HW,TS.CP.FS[,'SC2'],CHA.Dia.FS)
+PLOT.CP.FS.SC2.HW$x$layout$title$text <- "Predicción Corto Plazo Subcontador 2 mediante HW. Fin de Semana."
+```
+
+```{r CPFSSC2HW,fig.cap="Predicciones a corto plazo del subcontador 2 mediante Holt-Winters. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.FS.SC2.HW
+```
+
+##### {.unlisted .unnumbered}
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.ES.SC2.TSLM <- FUN.TSLM.Modelo(window(TS.CP.ES[,'SC2'],end=c(3,24)),22)
+PLOT.CP.ES.SC2.TSLM <- FUN.TSLM.Plot(M.CP.ES.SC2.TSLM,TS.CP.ES[,'SC2'],CHA.Dia.ES)
+PLOT.CP.ES.SC2.TSLM$x$layout$title$text <- "Predicción Corto Plazo Subcontador 2 mediante TSLM. Entre Semana."
+```
+
+```{r CPESSC2TSLM,fig.cap="Predicciones a corto plazo del subcontador 2 mediante TSLM. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.ES.SC2.TSLM
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.FS.SC2.TSLM <- FUN.TSLM.Modelo(window(TS.CP.FS[,'SC2'],end=c(3,24)),24)
+PLOT.CP.FS.SC2.TSLM <- FUN.TSLM.Plot(M.CP.FS.SC2.TSLM,TS.CP.FS[,'SC2'],CHA.Dia.FS)
+PLOT.CP.FS.SC2.TSLM$x$layout$title$text <- "Predicción Corto Plazo Subcontador 2 mediante TSLM. Fin de Semana."
+```
+
+```{r CPFSSC2TSLM,fig.cap="Predicciones a corto plazo del subcontador 2 mediante TSLM. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.FS.SC2.TSLM
+```
+
+##### {.unlisted .unnumbered}
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r CPESSC2HWE,fig.cap="Métricas del error. Corto plazo. Entre Semana. Lavandería",fig.width=8,fig.height=4}
+PLOT.CP.ES.SC2.HW.E <- FUN.Error(M.CP.ES.SC2.HW,window(TS.CP.ES[,'SC2'],start=4))
+PLOT.CP.ES.SC2.HW.E
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r CPFSSC2HWE,fig.cap="Métricas del error. Corto plazo. Fin de Semana. Lavandería",fig.width=8,fig.height=4}
+PLOT.CP.FS.SC2.HW.E <- FUN.Error(M.CP.FS.SC2.HW,window(TS.CP.FS[,'SC2'],start=4))
+PLOT.CP.FS.SC2.HW.E
+```
+
+##### {.unlisted .unnumbered}
+
+### SUBCONTADOR 3: CALENTADOR Y AC
+
+#### DESCOMPOSICIÓN
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+
+```{r SC3ESDesc, fig.cap="Descomposición a corto plazo del registro del subcontador 3.",fig.width=8,fig.height=6}
+#Gráfico Descomposición SC3
+PLOT.CP.SC3.ES.Dec <- stl(TS.CP.ES[,'SC3'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Subcontador 3. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=8,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Horas [kWh]")+
+    scale_x_continuous(name ="Hora",limit=c(1,6),breaks=seq(1,5+21/24,4/24),labels=CHA.Dia.ES[seq(1,118,4)],minor_breaks = NULL)
+PLOT.CP.SC3.ES.Dec
+```
+
+El subcontador 3 muestra una componente estacional mucho más significativa y regular que los demás incluso a granularidades finas. Es más regular y, por lo tanto, más fácil de predecir.
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r SC3FSDesc, fig.cap="Descomposición a corto plazo del registro del subcontador 3. Fin de semana.",fig.width=8,fig.height=6}
+#Gráfico Descomposición SC3
+PLOT.CP.SC3.FS.Dec <- stl(TS.CP.FS[,'SC3'],s.window = 'periodic') %>% autoplot()+
+    ggtitle('Subcontador 3. Descomposición.')+
+    theme(axis.text.x = element_text(color='black',size=10,angle=90,),
+          axis.text.y = element_text(color='black',size=10,angle=0))+
+    scale_y_continuous(name ="Energía por Horas [kWh]")+
+    scale_x_continuous(name ="Hora",limit=c(1,5),breaks=seq(1,5-1/24,4/24),labels=CHA.Dia.FS[seq(1,96,4)],minor_breaks = NULL)
+PLOT.CP.SC3.FS.Dec
+```
+
+A pesar de lo visto para días de entre semana, los fines de semana no son tan regulares. A pesar de ello, se captura tendencia, ruido y estacionalidad del mismo orden de magnitud y podemos esperar cierta precisión en los resultados.
+
+##### {.unlisted .unnumbered}
+
+#### MODELADO
+
+##### HOLT-WINTERS
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.ES.SC3.HW <- FUN.HW.Modelo(window(TS.CP.ES[,'SC3'],end=c(3,24)),22)
+PLOT.CP.ES.SC3.HW <- FUN.HW.Plot(M.CP.ES.SC3.HW,TS.CP.ES[,'SC3'],CHA.Dia.ES)
+PLOT.CP.ES.SC3.HW$x$layout$title$text <- "Predicción Corto Plazo Subcontador 3 mediante HW. Entre Semana."
+```
+
+```{r CPESSC3HW,fig.cap="Predicciones a corto plazo del subcontador 3 mediante Holt-Winters. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.ES.SC3.HW
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.FS.SC3.HW <- FUN.HW.Modelo(window(TS.CP.FS[,'SC3'],end=c(3,24)),24)
+PLOT.CP.FS.SC3.HW <- FUN.HW.Plot(M.CP.FS.SC3.HW,TS.CP.FS[,'SC3'],CHA.Dia.FS)
+PLOT.CP.FS.SC3.HW$x$layout$title$text <- "Predicción Corto Plazo Subcontador 3 mediante HW. Fin de Semana."
+```
+
+```{r CPFSSC3HW,fig.cap="Predicciones a corto plazo del subcontador 3 mediante Holt-Winters. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.FS.SC3.HW
+```
+
+##### {.unlisted .unnumbered}
+
+##### TIME SERIES LINEAR MODEL (TSLM)
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.ES.SC3.TSLM <- FUN.TSLM.Modelo(window(TS.CP.ES[,'SC3'],end=c(3,24)),22)
+PLOT.CP.ES.SC3.TSLM <- FUN.TSLM.Plot(M.CP.ES.SC3.TSLM,TS.CP.ES[,'SC3'],CHA.Dia.ES)
+PLOT.CP.ES.SC3.TSLM$x$layout$title$text <- "Predicción Corto Plazo Subcontador 3 mediante TSLM. Entre Semana."
+```
+
+```{r CPESSC3TSLM,fig.cap="Predicciones a corto plazo del subcontador 3 mediante TSLM. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.ES.SC3.TSLM
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.FS.SC3.TSLM <- FUN.TSLM.Modelo(window(TS.CP.FS[,'SC3'],end=c(3,24)),24)
+PLOT.CP.FS.SC3.TSLM <- FUN.TSLM.Plot(M.CP.FS.SC3.TSLM,TS.CP.FS[,'SC3'],CHA.Dia.FS)
+PLOT.CP.FS.SC3.TSLM$x$layout$title$text <- "Predicción Corto Plazo Subcontador 3 mediante TSLM. Fin de Semana."
+```
+
+```{r CPFSSC3TSLM,fig.cap="Predicciones a corto plazo del subcontador 3 mediante TSLM. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.FS.SC3.TSLM
+```
+
+##### {.unlisted .unnumbered}
+
+#### ANÁLISIS DEL ERROR. SELECCIÓN DEL MODELO.
+
+
+
+##### {.tabset .unlisted .unnumbered}
+
+###### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r CPESSC3HWE,fig.cap="Métricas del error. Corto plazo. Entre Semana. Calentador y AC",fig.width=8,fig.height=4}
+PLOT.CP.ES.SC3.HW.E <- FUN.Error(M.CP.ES.SC3.HW,window(TS.CP.ES[,'SC3'],start=4))
+PLOT.CP.ES.SC3.HW.E
+```
+
+###### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r CPFSSC3HWE,fig.cap="Métricas del error. Corto plazo. Fin de Semana. Calentador y AC",fig.width=8,fig.height=4}
+PLOT.CP.FS.SC3.HW.E <- FUN.Error(M.CP.FS.SC3.HW,window(TS.CP.FS[,'SC3'],start=4))
+PLOT.CP.FS.SC3.HW.E
+```
+
+##### {.unlisted .unnumbered}
+
+# RESULTADOS
+
+## SELECCIÓN DEL MODELO Y JUSTIFICACIÓN
+
+Para realizar las predicciones se tomará los intervalos de tiempo ya considerados en la sección anterior. Esta vez se entrena el modelo utilizando la totalidad de los datos.
+
+En todos los casos se visualizarán dos predicciones:
+
+* **Predicción de la Tendencia:** Se realizará una predicción limitándose a la tendencia de la señal. Esta predicción será de gran utilidad para visualizar si nuestro consumo en ciertos electrodomésticos va en ascenso, descenos o es estable. No pretende predecir con exactitud nuestro consumo.
+
+* **Predicción de la tendencia y estacionalidad:** El modelo predictivo contiene información tanto de la tendencia como de la estacionalidad del registro de datos. El objetivo aquí es predecir el futuro consumo con la mayor precisión posible.
+
+### LARGO PLAZO
+
+```{r include=FALSE}
+CHA.Yearly.Pred <- c(CHA.Yearly,'Nov 10','Dic 10','Ene 11','Feb 11','Mar 11','Abr 11',
+                     'May 11','Jun 11', 'Jul 11', 'Ago 11', 'Sep 11', 'Oct 11')
+```
+
+```{r}
+#Función plotear modelos
+FUN.M.Plot <- function(M,TS,AxisX,N){
+  if(missing(N)){
+    N<-length(M[[1]]$x)
+  }
+  h <- length(M[[1]]$mean)
+  AxisX <- tail(AxisX,N+h)
+  TS <- tail(TS,N)
+  DF1 <- list()
+  DF <- data.frame()
+  DF1[[1]] <- data.frame(Tiempo = AxisX[1:N] %>% factor(levels = AxisX),
+                         Prediccion = TS %>% as.numeric(),
+                         Intervalo10 = TS %>% as.numeric(),
+                         Intervalo20 = TS %>% as.numeric(),
+                         Intervalo30 = TS %>% as.numeric(),
+                         Intervalo40 = TS %>% as.numeric(),
+                         Intervalo50 = TS %>% as.numeric(),
+                         Intervalo60 = TS %>% as.numeric(),
+                         Intervalo70 = TS %>% as.numeric(),
+                         Intervalo80 = TS %>% as.numeric(),
+                         Intervalo90 = TS %>% as.numeric(),
+                         Intervalo95 = TS %>% as.numeric(),
+                         Sup10 = TS %>% as.numeric(),
+                         Sup20 = TS %>% as.numeric(),
+                         Sup30 = TS %>% as.numeric(),
+                         Sup40 = TS %>% as.numeric(),
+                         Sup50 = TS %>% as.numeric(),
+                         Sup60 = TS %>% as.numeric(),
+                         Sup70 = TS %>% as.numeric(),
+                         Sup80 = TS %>% as.numeric(),
+                         Sup90 = TS %>% as.numeric(),
+                         Sup95 = TS %>% as.numeric(),
+                         Serie = 'Real')
+    DF1[[2]] <- data.frame(Tiempo = AxisX[(N+1):(N+h)] %>% factor(levels = AxisX),
+                             Prediccion = M[[1]]$mean %>% as.numeric(),
+                             Intervalo10 = M[[1]]$lower[,1] %>% as.numeric(),
+                             Intervalo20 = M[[1]]$lower[,2] %>% as.numeric(),
+                             Intervalo30 = M[[1]]$lower[,3] %>% as.numeric(),
+                             Intervalo40 = M[[1]]$lower[,4] %>% as.numeric(),
+                             Intervalo50 = M[[1]]$lower[,5] %>% as.numeric(),
+                             Intervalo60 = M[[1]]$lower[,6] %>% as.numeric(),
+                             Intervalo70 = M[[1]]$lower[,7] %>% as.numeric(),
+                             Intervalo80 = M[[1]]$lower[,8] %>% as.numeric(),
+                             Intervalo90 = M[[1]]$lower[,9] %>% as.numeric(),
+                             Intervalo95 = M[[1]]$lower[,10] %>% as.numeric(),
+                             Sup10 = M[[1]]$upper[,1] %>% as.numeric(),
+                             Sup20 = M[[1]]$upper[,2] %>% as.numeric(),
+                             Sup30 = M[[1]]$upper[,3] %>% as.numeric(),
+                             Sup40 = M[[1]]$upper[,4] %>% as.numeric(),
+                             Sup50 = M[[1]]$upper[,5] %>% as.numeric(),
+                             Sup60 = M[[1]]$upper[,6] %>% as.numeric(),
+                             Sup70 = M[[1]]$upper[,7] %>% as.numeric(),
+                             Sup80 = M[[1]]$upper[,8] %>% as.numeric(),
+                             Sup90 = M[[1]]$upper[,9] %>% as.numeric(),
+                             Sup95 = M[[1]]$upper[,10] %>% as.numeric(),
+                             Serie = "Tendencia")
+    DF1[[3]] <- data.frame(Tiempo = AxisX[(N+1):(N+h)] %>% factor(levels = AxisX),
+                             Prediccion = M[[2]]$mean %>% as.numeric(),
+                             Intervalo10 = M[[2]]$lower[,1] %>% as.numeric(),
+                             Intervalo20 = M[[2]]$lower[,2] %>% as.numeric(),
+                             Intervalo30 = M[[2]]$lower[,3] %>% as.numeric(),
+                             Intervalo40 = M[[2]]$lower[,4] %>% as.numeric(),
+                             Intervalo50 = M[[2]]$lower[,5] %>% as.numeric(),
+                             Intervalo60 = M[[2]]$lower[,6] %>% as.numeric(),
+                             Intervalo70 = M[[2]]$lower[,7] %>% as.numeric(),
+                             Intervalo80 = M[[2]]$lower[,8] %>% as.numeric(),
+                             Intervalo90 = M[[2]]$lower[,9] %>% as.numeric(),
+                             Intervalo95 = M[[2]]$lower[,10] %>% as.numeric(),
+                             Sup10 = M[[2]]$upper[,1] %>% as.numeric(),
+                             Sup20 = M[[2]]$upper[,2] %>% as.numeric(),
+                             Sup30 = M[[2]]$upper[,3] %>% as.numeric(),
+                             Sup40 = M[[2]]$upper[,4] %>% as.numeric(),
+                             Sup50 = M[[2]]$upper[,5] %>% as.numeric(),
+                             Sup60 = M[[2]]$upper[,6] %>% as.numeric(),
+                             Sup70 = M[[2]]$upper[,7] %>% as.numeric(),
+                             Sup80 = M[[2]]$upper[,8] %>% as.numeric(),
+                             Sup90 = M[[2]]$upper[,9] %>% as.numeric(),
+                             Sup95 = M[[2]]$upper[,10] %>% as.numeric(),
+                             Serie = "Tendencia+Estacionalidad")
+  DF <- rbind(DF1[[1]],DF1[[2]],DF1[[3]])
+  DF1 <- gather(DF[,seq(1,12)],IntervaloConfianza,Inferior,Intervalo10:Intervalo95)
+  DF2 <- gather(DF[,seq(13,23)],IntervaloConfianza,Superior,Sup10:Sup95)
+  DF <- cbind(DF1,DF2[,c(1,3)])
+  plot <- ggplot(DF,aes(x=Tiempo,y=Prediccion,color=Serie,fill=Serie,group=1,frame=IntervaloConfianza))+
+            geom_line(size=0.5)+
+            geom_ribbon(aes(ymin=Inferior,ymax=Superior),alpha=0.3)+
+            ggtitle('Predicciones ')+
+            theme(axis.text.x = element_text(color='black',size=8,angle=90),
+                  axis.text.y = element_text(color='black',size=10,angle=0),
+                  legend.position="bottom")+
+            scale_y_continuous(name ="Energía [kWh]")+
+            scale_x_discrete(name ="Tiempo")+
+            guides(color=guide_legend(title=""),linetype=guide_legend(title=""))
+  plot <- ggplotly(plot)
+  real <- c(seq(1,10),seq(31,40))
+  for(i in real){
+    plot$x$data[[i]]$line$color <- 'black'
+    plot$x$data[[i]]$showlegend <- F
+  }
+  return(plot)
+}
+```
+
+```{r}
+#Función crear modelo
+FUN.Modelo <- function(TS,h){
+  M <- list()
+  M[[1]] <- HoltWinters(TS,beta=NULL,gamma=F) %>% forecast(h=h,level=c(seq(10,90,10),95))
+  M[[2]] <- HoltWinters(TS,beta=NULL,gamma=NULL) %>% forecast(h=h,level=c(seq(10,90,10),95))
+  return(M)
+}
+
+```
+
+* **ENERGÍA ACTIVA**
+
+```{r}
+#Creamos los modelos
+M.LP.EA <- FUN.Modelo(TS.LP[,'EA'],12)
+PLOT.LP.EA.M <- FUN.M.Plot(M.LP.EA,TS.LP[,'EA'],CHA.Yearly.Pred)
+PLOT.LP.EA.M$x$layout$title$text <- "Predicción Largo Plazo. Energía Activa"
+```
+
+```{r LPEAM,fig.cap="Predicciones a largo plazo para la energía activa.",fig.width=8,fig.height=6}
+PLOT.LP.EA.M
+```
+
+
+* **ENERGÍA REACTIVA**
+
+```{r}
+#Creamos los modelos
+M.LP.ER <- FUN.Modelo(TS.LP[,'ER'],12)
+PLOT.LP.ER.M <- FUN.M.Plot(M.LP.ER,TS.LP[,'ER'],CHA.Yearly.Pred)
+PLOT.LP.ER.M$x$layout$title$text <- "Predicción Largo Plazo. Energía Reactiva"
+```
+
+```{r LPERM,fig.cap="Predicciones a largo plazo para la energía reactiva.",fig.width=8,fig.height=6}
+PLOT.LP.ER.M
+```
+
+
+* **SC1 COCINA**
+
+```{r}
+#Creamos los modelos
+M.LP.SC1 <- FUN.Modelo(TS.LP[,'SC1'],12)
+PLOT.LP.SC1.M <- FUN.M.Plot(M.LP.SC1,TS.LP[,'SC1'],CHA.Yearly.Pred)
+PLOT.LP.SC1.M$x$layout$title$text <- "Predicción Largo Plazo. Subcontador 1: Cocina"
+```
+
+```{r LPSC1M,fig.cap="Predicciones a largo plazo para el subcontador 1: Cocina.",fig.width=8,fig.height=6}
+PLOT.LP.SC1.M
+```
+
+* **SC2 LAVANDERÍA**
+
+```{r}
+#Creamos los modelos
+M.LP.SC2 <- FUN.Modelo(TS.LP[,'SC2'],12)
+PLOT.LP.SC2.M <- FUN.M.Plot(M.LP.SC2,TS.LP[,'SC2'],CHA.Yearly.Pred)
+PLOT.LP.SC2.M$x$layout$title$text <- "Predicción Largo Plazo. Subcontador 2: Lavandería"
+```
+
+```{r LPSC2M,fig.cap="Predicciones a largo plazo para el subcontador 2: Lavandería.",fig.width=8,fig.height=6}
+PLOT.LP.SC2.M
+```
+
+* **SC3 CALENTADOR Y AC**
+
+```{r}
+#Creamos los modelos
+M.LP.SC3  <- FUN.Modelo(TS.LP[,'SC3'],12)
+PLOT.LP.SC3.M <- FUN.M.Plot(M.LP.SC3,TS.LP[,'SC3'],CHA.Yearly.Pred)
+PLOT.LP.SC3.M$x$layout$title$text <- "Predicción Largo Plazo. Subcontador 3: Calentador y AC"
+```
+
+```{r LPSC3M,fig.cap="Predicciones a largo plazo para el subcontador 3: Calentador y AC.",fig.width=8,fig.height=6}
+PLOT.LP.SC3.M
+```
+
+### MEDIO PLAZO
+
+```{r include=FALSE}
+CHA.Semana.Pred <- c(CHA.Semana,'26/11 V','27/11 S','28/11 D','29/11 L','30/11 M','01/12 X','02/12 J')
+```
+
+* **ENERGÍA ACTIVA**
+
+```{r}
+#Creamos los modelos
+M.MP.EA <- FUN.Modelo(TS.MP[,'EA'],7)
+PLOT.MP.EA.M <- FUN.M.Plot(M.MP.EA,TS.MP[,'EA'],CHA.Semana.Pred)
+PLOT.MP.EA.M$x$layout$title$text <- "Predicción Medio Plazo. Energía Activa"
+```
+
+```{r MPEAM,fig.cap="Predicciones a medio plazo para la energía activa.",fig.width=8,fig.height=6}
+PLOT.MP.EA.M
+```
+
+* **SC1 COCINA**
+
+```{r}
+#Creamos los modelos
+M.MP.SC1 <- FUN.Modelo(TS.MP[,'SC1'],7)
+PLOT.MP.SC1.M <- FUN.M.Plot(M.MP.SC1,TS.MP[,'SC1'],CHA.Semana.Pred)
+PLOT.MP.SC1.M$x$layout$title$text <- "Predicción Medio Plazo. Subcontador 1: Cocinas"
+```
+
+```{r MPSC1M,fig.cap="Predicciones a medio plazo para el subcontador 1: cocina.",fig.width=8,fig.height=6}
+PLOT.MP.SC1.M
+```
+
+* **SC2 LAVANDERÍA**
+
+```{r}
+#Creamos los modelos
+M.MP.SC2 <- FUN.Modelo(TS.MP[,'SC2'],7)
+PLOT.MP.SC2.M <- FUN.M.Plot(M.MP.SC2,TS.MP[,'SC2'],CHA.Semana.Pred)
+PLOT.MP.SC2.M$x$layout$title$text <- "Predicción Medio Plazo. Subcontador 2: Lavandería"
+```
+
+```{r MPSC2M,fig.cap="Predicciones a medio plazo para el subcontador 2: lavandería.",fig.width=8,fig.height=6}
+PLOT.MP.SC2.M
+```
+
+* **SC3 CALENTADOR Y AC**
+
+```{r}
+#Creamos los modelos
+M.MP.SC3 <- FUN.Modelo(TS.MP[,'SC3'],7)
+PLOT.MP.SC3.M <- FUN.M.Plot(M.MP.SC3,TS.MP[,'SC3'],CHA.Semana.Pred)
+PLOT.MP.SC3.M$x$layout$title$text <- "Predicción Medio Plazo. Subcontador 3: Calentador y AC"
+```
+
+```{r MPSC3M,fig.cap="Predicciones a medio plazo para el subcontador 3: Calentador y AC",fig.width=8,fig.height=6}
+PLOT.MP.SC3.M
+```
+
+
+### CORTO PLAZO
+
+```{r include=FALSE}
+CHA.Dia.ES.Pred <- c(CHA.Dia.ES,'22h 26/11','23h 26/11','0h 29/11','1h 29/11','2h 29/11',
+    '3h 29/11','4h 29/11','5h 29/11','6h 29/11','7h 29/11','8h 29/11','9h 29/11',
+    '10h 29/11','11h 29/11','12h 29/11','13h 29/11','14h 29/11','15h 29/11',
+    '16h 29/11','17h 29/11','18h 29/11','19h 29/11','20h 29/11','21h 29/11')
+CHA.Dia.FS.Pred <- c(CHA.Dia.FS,'0h S 27/11','1h S 27/11','2h S 27/11','3h S 27/11',
+                '4h S 27/11','5h S 27/11','6h S 27/11','7h S 27/11','8h S 27/11',
+                '9h S 27/11','10h S 27/11','11h S 27/11','12h S 27/11','13h S 27/11',
+                '14h S 27/11','15h S 27/11','16h S 27/11','17h S 27/11','18h S 27/11',
+                '19h S 27/11','20h S 27/11','21h S 27/11','22h S 27/11','23h S 27/11')
+```
+
+* **ENERGÍA ACTIVA**
+
+#### {.tabset .unlisted .unnumbered}
+
+##### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.EA.ES <- FUN.Modelo(TS.CP.ES[,'EA'],24)
+PLOT.CP.EA.ES.M <- FUN.M.Plot(M.CP.EA.ES,TS.CP.ES[,'EA'],CHA.Dia.ES.Pred,24)
+PLOT.CP.EA.ES.M$x$layout$title$text <- "Predicción Corto Plazo entre Semana. Energía Activa"
+```
+
+```{r CPEAESM,fig.cap="Predicciones a corto plazo para la energía activa. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.EA.ES.M
+```
+
+##### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.EA.FS <- FUN.Modelo(TS.CP.FS[,'EA'],24)
+PLOT.CP.EA.FS.M <- FUN.M.Plot(M.CP.EA.FS,TS.CP.FS[,'EA'],CHA.Dia.FS.Pred,24)
+PLOT.CP.EA.FS.M$x$layout$title$text <- "Predicción Corto Plazo fin de Semana. Energía Activa"
+```
+
+```{r CPEAFSM,fig.cap="Predicciones a corto plazo para la energía activa. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.EA.FS.M
+```
+
+#### {.unlisted .unnumbered}
+
+* **SC1 COCINA**
+
+#### {.tabset .unlisted .unnumbered}
+
+##### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.SC1.ES <- FUN.Modelo(TS.CP.ES[,'SC1'],24)
+PLOT.CP.SC1.ES.M <- FUN.M.Plot(M.CP.SC1.ES,TS.CP.ES[,'SC1'],CHA.Dia.ES.Pred,24)
+PLOT.CP.SC1.ES.M$x$layout$title$text <- "Predicción Corto Plazo entre Semana. Subcontador 1: Cocina"
+```
+
+```{r CPSC1ESM,fig.cap="Predicciones a corto plazo para el subcontador 1: cocina. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.SC1.ES.M
+```
+
+##### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.SC1.FS <- FUN.Modelo(TS.CP.FS[,'SC1'],24)
+PLOT.CP.SC1.FS.M <- FUN.M.Plot(M.CP.SC1.FS,TS.CP.FS[,'SC1'],CHA.Dia.FS.Pred,48)
+PLOT.CP.SC1.FS.M$x$layout$title$text <- "Predicción Corto Plazo fin de Semana. Subcontador 1: cocina"
+```
+
+```{r CPSC1FSM,fig.cap="Predicciones a corto plazo para el subcontador 1: cocina. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.SC1.FS.M
+```
+
+#### {.unlisted .unnumbered}
+
+* **SC2 LAVANDERÍA**
+
+#### {.tabset .unlisted .unnumbered}
+
+##### ENTRE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.SC2.ES <- FUN.Modelo(TS.CP.ES[,'SC2'],24)
+PLOT.CP.SC2.ES.M <- FUN.M.Plot(M.CP.SC2.ES,TS.CP.ES[,'SC2'],CHA.Dia.ES.Pred,24)
+PLOT.CP.SC2.ES.M$x$layout$title$text <- "Predicción Corto Plazo entre Semana. Subcontador 2: Lavandería"
+```
+
+```{r CPSC2ESM,fig.cap="Predicciones a corto plazo para el subcontador 2: lavandería. Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.SC2.ES.M
+```
+
+##### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.SC2.FS <- FUN.Modelo(TS.CP.FS[,'SC2'],24)
+PLOT.CP.SC2.FS.M <- FUN.M.Plot(M.CP.SC2.FS,TS.CP.FS[,'SC2'],CHA.Dia.FS.Pred,24)
+PLOT.CP.SC2.FS.M$x$layout$title$text <- "Predicción Corto Plazo fin de Semana. Subcontador 2: lavandería"
+```
+
+```{r CPSC2FSM,fig.cap="Predicciones a corto plazo para el subcontador 2: lavandería. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.SC2.FS.M
+```
+
+#### {.unlisted .unnumbered}
+
+* **SC3 CALENTADOR Y AC**
+
+#### {.tabset .unlisted .unnumbered}
+
+##### ENTRE SEMANA {.unlisted .unnumbered}
+
+
+```{r}
+#Creamos los modelos
+M.CP.SC3.ES <- FUN.Modelo(TS.CP.ES[,'SC3'],24)
+PLOT.CP.SC3.ES.M <- FUN.M.Plot(M.CP.SC3.ES,TS.CP.ES[,'SC3'],CHA.Dia.ES.Pred,24)
+PLOT.CP.SC3.ES.M$x$layout$title$text <- "Predicción Corto Plazo entre Semana. Subcontador 3: Calentador y AC"
+```
+
+```{r CPSC3ESM,fig.cap="Predicciones a corto plazo para el subcontador 3: calentador y AC Entre semana.",fig.width=8,fig.height=6}
+PLOT.CP.SC3.ES.M
+```
+
+##### FIN DE SEMANA {.unlisted .unnumbered}
+
+```{r}
+#Creamos los modelos
+M.CP.SC3.FS <- FUN.Modelo(TS.CP.FS[,'SC3'],24)
+PLOT.CP.SC3.FS.M <- FUN.M.Plot(M.CP.SC3.FS,TS.CP.FS[,'SC3'],CHA.Dia.FS.Pred,24)
+PLOT.CP.SC3.FS.M$x$layout$title$text <- "Predicción Corto Plazo fin de Semana. Subcontador 3: calentador y AC"
+```
+
+```{r CPSC3FSM,fig.cap="Predicciones a corto plazo para el subcontador 3: calentador y AC. Fin de semana.",fig.width=8,fig.height=6}
+PLOT.CP.SC3.FS.M
+```
+
+#### {.unlisted .unnumbered}
+
+```{r include=FALSE}
+#Guardar datos
+save.image(file="Data.RData")
+```
+
+## CONCLUSIONES
+
+Todos los modelos creados así como el análisis exploratorio nos permiten extraer una gran cantidad de conslusiones generales que se exponen a continuación:
+
+* Los subcontadores 1 (cocina) y 2 (lavandería) no muestran patrones tan claros y no reflejan una clara regularidad. A diferencia de estos, el subcontador 3 (calentador y AC) muestra un consumo más regular y fácil de predecir. Podría deberse a los ciclos de encendido y apagado de los electrodomésticos asociados, a diferencia de los dos primeros que dependen directamente del usuario.
+
+* Las predicciones a largo plazo no son susceptibles a comportamientos irregulares por parte del usuario y, por lo tanto, detectan tendencias y, sobretodo, estacionalidades de forma muy clara si existen.
+
+* Por el contrario, las predicciones a corto plazo son muy susceptibles del comportamiento humano y muestran una alta irregularidad asociada a este. Resulta más complicado realizar predicciones precisas de la evolución del consumo. A pesar de ello, podemos extraer comportamientos habituales.
+
+Las distintas granularidades con qué se han analizado los datos nos permiten extraer conclusiones totalmente distintas a pesar de que todas ellas parten de los mismos datos. Por esta razón, se dividirán las conclusiones en tres apartados según la granularidad considerada.
+
+
+### CONCLUSIONES A LARGO PLAZO
+
+El análisis a largo plazo trata de sacar conclusiones sobre el consumo anual, agrupando los datos por meses. Las conclusiones son:
+
+* El punto anterior queda muy bien reflejado en el registro de la energía total activa consumida. El modelo encontrado en \@ref(fig:LPEAHW) es capaz de capturar con gran precisión el futuro consumo. Esto también sucede para los subcontadores 1 y 3 aunque en menor medida. Para el subcontador 2 el modelo da peores resultados.
+
+* En cuanto a la energía reactiva, aunque no importa tanto su predicción precisa (no la podemos controlar), si es de gran interés visualizar su tendencia. Tanto en el análisis exploratorio (figura \@ref(fig:MediaE)) como en el ajuste del modelo (figura \@ref(fig:LPERHW)), se ha analizado la tendencia de esta y no muestra una tendencia ni al alza ni a la baja.
+
+* Tanto en la figura \@ref(fig:MediaSC) como en la figura \@ref(fig:ProporcionAnual) se visualizan dos tendencias muy claras:
+
+  * El subcontador 3 referente al calentador y AC muestra una tendencia al alza a largo plazo. En la primer figura se muestra como la media fluctúa alrededor de una recta de pendiente positiva. En la segunda imagen mencionada se ve aún más claro: se visualiza el porcentaje de energía que representa cada subcontador sobre el total y se puede ver como la energía registrada por el subcontador 3 gana protagonismo año tras año. Además, nuestro modelo definitivo también captura esta tendencia en la figura \@ref(fig:LPSC3M).
+  
+  * En los mismos gráficos también queda plasmada la tendencia del subcontador 2 referente a la lavandería. Esta vez la tendencia es a la baja y pero más sutil que en el caso anterior. 
+
+### CONCLUSIONES A MEDIO PLAZO
+
+Recordemos que el análisis a medio plazo tiene como propósito la predicción del consumo semanal, agrupando los datos por días. Las conclusiones son:
+
+* Como se ha mencionado en las conclusiones generales, resulta imposible realizar una predicción precisa del consumo debido a la irregularidad de los factores humanos. Sin embargo, sí es posible extraer una semana modelo construida a partir de hábitos con mayor probabilidad.
+
+* Estos hábitos quedan muy bien resumidos en la figura \@ref(fig:PercentilesDia). Por ejemplo, la lavandería muestra picos de consumo los fines de semana y otro día adicional entre semana, habitualmente el miércoles.
+
+### CONCLUSIONES A CORTO PLAZO
+
+En el análisis a corto plazo se pretende visualizar la tendencia del usuario a lo largo del día, agrupando los datos por horas. Las conclusiones son:
+
+* Existen diferencias significativas entre los fines de semana y el resto de días. Por este motivo, se han analizado por separado.
+
+* El gráfico de la figura \@ref(fig:PercentilesHora) muestra el consumo por horas a lo largo de la semana. Se visualizan los percentiles 10, 50 y 90% y da una idea de como es un día modelo. De este gráfico podemos extraer información para cada subcontador:
+
+  * Subcontador 1 (Cocina): el gráfico muestra la curva del percentil 50% a niveles muy bajos. Lo que indica que no existe un periodo claro donde se utilice la cocina de forma habitual. Sin embargo, aunque no sepamos cuándo se va a usar, sí sabemos que, cuando se usa, se hace en unos períodos bien definidos. Entre semana muestra un consumo a lo largo de dos períodos. Uno por la mañana y mediodía (entre las 8 y las 13 horas) y otro por la noche (entre las 20 horas y la 1 de la madrugada del día siguiente). El miércoles también se llega a utilizar de forma excepcional entre las 13 y las 18 horas.
+  
+  * Subcontador 2 (Lavandería): de igual forma que el caso anterior, el percentil 50% muestra valores prácticamente nulos también. Por lo tanto, no existe un periodo de tiempo en que se use la lavandería de forma habitual. A pesar de ello, se observa claramente que se usa la lavandería dos veces por semana habitualmente. Los martes o miércoles y los sábados o domingos muestran picos notables.
+  
+  * Subcontador 3 (calentador y AC): a diferencia de los demás subcontadores, la curva del percentil 50% si se levanta. Además, se levanta todos los días entre semana de forma muy regular entre las 7 y las 14 horas. Cabe destacar también que el consumo del calentador va asociado a los demás subcontadores y en la figura queda muy bien reflejado: cuando los subcontadores 1 y 2 indican un mayor consumo, el subcontador 3 suele acompañar mostrando esa misma tendencia.
+  
+* Los fines de semana indican un alto consumo en todos los subcontadores a lo largo de la tarde y noche. Parece ser que el usuario aprovecha el fin de semana para hacer la colada y cocinar. Podría ser que aproveche el tiempo libre del fin de semana para cocinar para el resto de días por ejemplo.
+
+## RESULTADOS DE INTERÉS PARA EL USUARIO
+
+Todas las conclusiones vistas en la sección anterior pueden traducirse en algunos consejos para el cliente. Se tratará de dar respuesta a los objetivos planteados en la presentación del proyecto:
+
+* **Detección de comportamientos inusuales**
+
+El modelo de predicción para el subcontador 3 referente al calentador y AC (figura \@ref(fig:LPSC3M)) muestra una predicción con tendencia positiva. El modelo nos está avisando de que el consumo va en ascenso y no muestra ninguna tendencia de que dicha curva se aplane. Revisar el consumo de los electrodomésticos involucrados es altamente recomendable, podría ser que un deterioro en el calentador o un mal aislamiento térmico de este pudiera disparar el consumo con el tiempo.
+
+* **Horas pico y horas bajas**
+
+El consumo del calentador es bastante regular y podría ser debido a los ciclos de encendido y apagado de este. Si el sistema de domótica pudiera encender el calentador justo antes de su uso para disponer del agua caliente necesaria en lugar de mantenerse encendido todo el día, se podría conseguir un ahorro energético considerable, con su consecuente ahorro monetario.
+
+* **Cuantificando las pérdidas**
+
+No se ha detectado ninguna tendencia en el consumo de energía reactiva por lo que no hay indicios de que la instalación requiera de revisión. Aún así, se recomienda hacer el seguimiento de forma continuada de los valores de la energía reactiva para reaccionar a tiempo ante cualquier comportamiento poco usual.
+
+# PRÓXIMOS PASOS
+
+En esta sección se indicarán algunos puntos de mejora para maximizar la información obtenida de los subcontadores en el futuro.
+
+* **Variables adicionales**
+
+Podríamos registrar algunas variables adicionales para mejorar el análisis. La variable más influyente que aportaría más información sería la **temperatura**. La temperatura explica en gran medida el consumo del usuario.
+
+La temperatura afecta tanto de forma directa cuando, por ejemplo, hace frío y el usuario decide poner la calefacción, como de forma indirecta en el rendimiento de los electrodomésticos: el calentador consumirá más para almacenar agua a cierta temperatura cuanto más frío haga en el exterior.
+
+Otra variable útil podría ser el coste de la luz. En ocasiones el coste depende en gran medida de la hora del día.
+
+* **Distribución de los subcontadores**
+
+Añadir o redistribuir los subcontadores podría aportar más información. Combinar electrodomésticos que funcionan en distintas épocas del año tal vez no sea la mejor idea. Los registros de consumo mezclarán distintas estacionalidades que resultarán más difíciles de manejar para el algoritmo de predicción.
+
+# ANEXO {.unnumbered}
+
+El nombre de todas las variables utilizadas siguen un mismo patrón para entender correctamente en qué consisten. El nombre de cada una de las variables está dividida por puntos "." tal que cada conjunto de carácteres tiene un significado y ayuda a identificar la variable. A continuación una breve explicación del significado de cada cadena de carácteres:
+
+La primera cadena de carácteres hacen referencia al tipo de variable. Existen los siguientes:
+
+* DF: Data Frame. Se han construido hasta 6 dataframes en este proyecto.
+
+  * Data: Data frame inicial con los datos ya tratados y preparados.
+  
+  * Data.Hour: datos agrupados por horas.
+  
+  * Data.Daily: datos agrupados por días.
+  
+  * Data.Weekly: datos agrupados por semanas.
+  
+  * Data.Monthly: datos agrupados por meses.
+  
+  * Data.Yearly: datos agrupados por años.
+
+* M: Modelo. En este caso se han utilizado dos algoritmos.
+
+  * Holt-Winters: La variable termina en HW
+  
+  * TSLM: La variable termina en TSLM.
+  
+  * Si no tiene terminación, es el modelo definitivo escogido según resultados. En este estudio se ha escogido el algoritmo Holt-Winters para todos los casos.
+
+* PLOT: Contiene un gráfico.
+
+* TS: Objeto que contiene una serie de datos en el tiempo (*time-series object*)
+
+* CHA: variable tipo *character*.
+
+* FUN: contiene una función.
+
+Otras cadenas de variables útiles que se repiten para una gran cantidad de variables y se combinan entre sí para identificarla.
+
+* Granularidad: puede ser LP, MP y CP y hacen referencia a largo, medio y corto plazo respectivamente. Para corto plazo, se utilizan los carácteres adicionales ES o FS para referirse a los periodos "Entre Semana" o "Fin de Semana".
+
+* Variable: puede ser EA, ER, SC1, SC2 y SC3 según hagan referencia a la energía activa, energía reactiva y cada uno de los subcontadores.
